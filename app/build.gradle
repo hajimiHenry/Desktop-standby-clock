@@ -2,6 +2,16 @@ plugins {
     id "com.android.application"
 }
 
+def releaseSigning = [
+        storeFile: System.getenv("STANDBY_CLOCK_KEYSTORE"),
+        storePassword: System.getenv("STANDBY_CLOCK_STORE_PASSWORD"),
+        keyAlias: System.getenv("STANDBY_CLOCK_KEY_ALIAS"),
+        keyPassword: System.getenv("STANDBY_CLOCK_KEY_PASSWORD")
+]
+def releaseSigningConfigured = releaseSigning.values().every {
+    it != null && !it.trim().isEmpty()
+}
+
 android {
     namespace "com.henry.standbyclock"
     compileSdk 35
@@ -11,10 +21,21 @@ android {
         minSdk 29
         targetSdk 35
         versionCode 1
-        versionName "1.0"
+        versionName "0.1.0"
 
         ndk {
             abiFilters "arm64-v8a"
+        }
+    }
+
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            release {
+                storeFile file(releaseSigning.storeFile)
+                storePassword releaseSigning.storePassword
+                keyAlias releaseSigning.keyAlias
+                keyPassword releaseSigning.keyPassword
+            }
         }
     }
 
@@ -22,6 +43,9 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            if (releaseSigningConfigured) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 

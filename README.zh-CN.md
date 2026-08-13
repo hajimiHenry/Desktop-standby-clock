@@ -35,6 +35,8 @@
 
 Debug APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。
 
+正式签名和发布流程记录在 [docs/RELEASING.md](docs/RELEASING.md)。
+
 ## 技术文档
 
 架构、环境光阈值、MIUI 常驻、安装、验证和故障排查统一记录在

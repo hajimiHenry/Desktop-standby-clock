@@ -36,6 +36,9 @@ Requires JDK 17 and Android SDK Platform 35.
 
 The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
+Release signing and publication are documented in
+[docs/RELEASING.md](docs/RELEASING.md).
+
 ## Documentation
 
 Architecture, ambient-light thresholds, MIUI persistence, installation, verification,

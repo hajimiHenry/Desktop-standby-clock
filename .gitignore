@@ -3,4 +3,5 @@
 .DS_Store
 local.properties
 **/build/
+dist/
 *.iml
