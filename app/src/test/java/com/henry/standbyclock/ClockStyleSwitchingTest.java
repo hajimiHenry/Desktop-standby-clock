@@ -42,6 +42,14 @@ public final class ClockStyleSwitchingTest {
     }
 
     @Test
+    public void leftSwipeOpensTrafficAndRightSwipeOpensDeviceControls() {
+        assertTrue(ClockStyleSwitching.opensTrafficDashboard(
+                ClockStyleSwitching.HorizontalSwipeDirection.LEFT));
+        assertFalse(ClockStyleSwitching.opensTrafficDashboard(
+                ClockStyleSwitching.HorizontalSwipeDirection.RIGHT));
+    }
+
+    @Test
     public void shortOrMostlyVerticalMovementIsNotAHorizontalSwipe() {
         assertEquals(
                 ClockStyleSwitching.HorizontalSwipeDirection.NONE,

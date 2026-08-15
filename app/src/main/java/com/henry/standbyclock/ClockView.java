@@ -141,6 +141,10 @@ public final class ClockView extends View {
     private boolean bedtimeSnoozed;
     private boolean settingsVisible;
     private boolean deviceMenuVisible;
+    private boolean trafficMenuSelected;
+    private boolean trafficDataLoaded;
+    private TrafficStatusFormatting.Display trafficDisplay =
+            TrafficStatusFormatting.Display.initial();
     private String ceilingLightStatus = "READY";
     private String desktopWakeStatus = "READY";
     private String previousCeilingLightStatus;
@@ -387,6 +391,37 @@ public final class ClockView extends View {
         return deviceMenuVisible || deviceMenuTransitioning;
     }
 
+    public boolean isTrafficMenuVisible() {
+        return deviceMenuVisible && trafficMenuSelected;
+    }
+
+    public void setTrafficLoading() {
+        if (!trafficDataLoaded) {
+            trafficDisplay = TrafficStatusFormatting.Display.loading();
+            invalidate();
+        }
+    }
+
+    public void setTrafficDisplay(TrafficStatusFormatting.Display display) {
+        if (display == null) {
+            return;
+        }
+        trafficDisplay = display;
+        trafficDataLoaded = true;
+        invalidate();
+    }
+
+    public void setTrafficOffline() {
+        trafficDisplay = TrafficStatusFormatting.offline(trafficDisplay);
+        invalidate();
+    }
+
+    public void setTrafficNotConfigured() {
+        trafficDisplay = TrafficStatusFormatting.Display.notConfigured();
+        trafficDataLoaded = true;
+        invalidate();
+    }
+
     public void setCeilingLightStatus(String status) {
         String nextStatus = status == null ? "UNKNOWN" : status;
         if (nextStatus.equals(ceilingLightStatus)) {
@@ -453,6 +488,10 @@ public final class ClockView extends View {
             return UiAction.NONE;
         }
         if (deviceMenuVisible) {
+            if (trafficMenuSelected) {
+                animateDeviceMenuVisibility(false, !deviceMenuTransitionSwipeLeft);
+                return UiAction.CLOSE_DEVICE_MENU;
+            }
             if (y >= 0.31f && y <= 0.72f) {
                 if (x >= 0.14f && x <= 0.47f) {
                     startDeviceButtonPulse(DEVICE_BUTTON_LIGHT);
@@ -535,6 +574,10 @@ public final class ClockView extends View {
                 boolean visible = !deviceMenuVisible;
                 boolean swipeLeft = horizontalDirection
                         == ClockStyleSwitching.HorizontalSwipeDirection.LEFT;
+                if (visible) {
+                    trafficMenuSelected =
+                            ClockStyleSwitching.opensTrafficDashboard(horizontalDirection);
+                }
                 if (!animateDeviceMenuVisibility(visible, swipeLeft)) {
                     return true;
                 }
@@ -659,7 +702,7 @@ public final class ClockView extends View {
         } else if (settingsVisible) {
             drawSettings(canvas, width, height);
         } else if (deviceMenuVisible) {
-            drawDeviceMenu(canvas, width, height);
+            drawUtilityMenu(canvas, width, height);
         }
 
         // Settings and reminder overlays retain the CRT treatment independently of the face.
@@ -723,9 +766,17 @@ public final class ClockView extends View {
             Canvas canvas, int width, int height, float offsetX, int alpha) {
         int layer = canvas.saveLayerAlpha(0f, 0f, width, height, alpha);
         canvas.translate(offsetX, 0f);
-        drawDeviceMenu(canvas, width, height);
+        drawUtilityMenu(canvas, width, height);
         drawScanlines(canvas, width, height);
         canvas.restoreToCount(layer);
+    }
+
+    private void drawUtilityMenu(Canvas canvas, int width, int height) {
+        if (trafficMenuSelected) {
+            drawTrafficMenu(canvas, width, height);
+        } else {
+            drawDeviceMenu(canvas, width, height);
+        }
     }
 
     private void drawClockFaces(
@@ -970,6 +1021,85 @@ public final class ClockView extends View {
         if (buttonPulseAnimating || lightStatusAnimating || desktopStatusAnimating) {
             postInvalidateOnAnimation();
         }
+    }
+
+    private void drawTrafficMenu(Canvas canvas, int width, int height) {
+        canvas.drawRect(0f, 0f, width, height, overlayPaint);
+
+        float left = width * 0.17f;
+        float right = width * 0.83f;
+        reminderLinePaint.setStrokeWidth(Math.max(2f, height * 0.0022f));
+        canvas.drawLine(left, height * 0.175f, right, height * 0.175f, reminderLinePaint);
+        canvas.drawLine(left, height * 0.825f, right, height * 0.825f, reminderLinePaint);
+
+        reminderTitlePaint.setTextSize(height * 0.064f);
+        canvas.drawText("TRAFFIC STATUS", width * 0.5f, height * 0.255f,
+                reminderTitlePaint);
+
+        float panelCenterY = height * 0.515f;
+        float panelWidth = width * 0.31f;
+        float panelHeight = height * 0.40f;
+        float hostCenterX = width * 0.305f;
+        float sanmaoCenterX = width * 0.695f;
+        drawFocusBrackets(
+                canvas, hostCenterX, panelCenterY, panelWidth, panelHeight, true);
+        drawFocusBrackets(
+                canvas, sanmaoCenterX, panelCenterY, panelWidth, panelHeight, true);
+
+        reminderActionPaint.setTextSize(height * 0.050f);
+        canvas.drawText(
+                DeviceControlConfig.TRAFFIC_HOST_LABEL,
+                hostCenterX,
+                height * 0.405f,
+                reminderActionPaint);
+        canvas.drawText(
+                DeviceControlConfig.TRAFFIC_SUBSCRIPTION_LABEL,
+                sanmaoCenterX,
+                height * 0.405f,
+                reminderActionPaint);
+
+        reminderBodyPaint.setTextSize(height * 0.054f);
+        canvas.drawText(
+                trafficDisplay.hostRemaining,
+                hostCenterX,
+                height * 0.510f,
+                reminderBodyPaint);
+        canvas.drawText(
+                trafficDisplay.sanmaoRemaining,
+                sanmaoCenterX,
+                height * 0.510f,
+                reminderBodyPaint);
+
+        reminderMutedPaint.setTextSize(height * 0.032f);
+        canvas.drawText(
+                trafficDisplay.hostDetail,
+                hostCenterX,
+                height * 0.585f,
+                reminderMutedPaint);
+        canvas.drawText(
+                trafficDisplay.sanmaoDetail,
+                sanmaoCenterX,
+                height * 0.585f,
+                reminderMutedPaint);
+
+        reminderMutedPaint.setTextSize(height * 0.027f);
+        canvas.drawText(
+                trafficDisplay.hostMeta,
+                hostCenterX,
+                height * 0.645f,
+                reminderMutedPaint);
+        canvas.drawText(
+                trafficDisplay.sanmaoMeta,
+                sanmaoCenterX,
+                height * 0.645f,
+                reminderMutedPaint);
+
+        reminderMutedPaint.setTextSize(height * 0.026f);
+        canvas.drawText(
+                "SWIPE OR TAP TO CLOSE   ·   " + trafficDisplay.footer,
+                width * 0.5f,
+                height * 0.775f,
+                reminderMutedPaint);
     }
 
     private void drawDeviceButtonBrackets(

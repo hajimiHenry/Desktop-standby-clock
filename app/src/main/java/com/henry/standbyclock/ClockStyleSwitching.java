@@ -39,6 +39,10 @@ final class ClockStyleSwitching {
         return deltaX < 0f ? HorizontalSwipeDirection.LEFT : HorizontalSwipeDirection.RIGHT;
     }
 
+    static boolean opensTrafficDashboard(HorizontalSwipeDirection direction) {
+        return direction == HorizontalSwipeDirection.LEFT;
+    }
+
     static long nextAutoSwitchAt(long nowMs) {
         return nowMs + AUTO_SWITCH_INTERVAL_MS;
     }

@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cookie_file="$script_dir/config/hostvds.cookie"
+temporary_file=""
+
+restore_terminal() {
+    stty echo 2>/dev/null || true
+    if [ -n "$temporary_file" ] && [ -f "$temporary_file" ]; then
+        rm -f -- "$temporary_file"
+    fi
+}
+trap restore_terminal EXIT HUP INT TERM
+
+mkdir -p -- "$script_dir/config"
+umask 077
+printf 'Paste the complete HostVDS Cookie header, then press Enter: '
+stty -echo
+IFS= read -r cookie
+stty echo
+printf '\n'
+
+case "$cookie" in
+    *=*) ;;
+    *)
+        printf 'Cookie was not saved: the value does not look like an HTTP Cookie header.\n' >&2
+        exit 1
+        ;;
+esac
+
+temporary_file=$(mktemp "$script_dir/config/.hostvds.cookie.XXXXXX")
+printf '%s' "$cookie" > "$temporary_file"
+chmod 600 "$temporary_file"
+mv -f -- "$temporary_file" "$cookie_file"
+temporary_file=""
+unset cookie
+if command -v docker >/dev/null 2>&1 \
+        && docker inspect traffic-status >/dev/null 2>&1; then
+    docker restart traffic-status >/dev/null
+    printf 'HostVDS Cookie saved and the traffic service restarted.\n'
+else
+    printf 'HostVDS Cookie saved. New data will be fetched within ten minutes.\n'
+fi

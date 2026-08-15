@@ -1,0 +1,28 @@
+services:
+  traffic-status:
+    build: .
+    container_name: traffic-status
+    restart: unless-stopped
+    user: "1000:1000"
+    ports:
+      - "${TRAFFIC_STATUS_PORT:-18080}:8080"
+    environment:
+      CACHE_FILE: /data/cache.json
+      CACHE_TTL_SECONDS: "${CACHE_TTL_SECONDS:-600}"
+      HOSTVDS_COOKIE_FILE: /config/hostvds.cookie
+      HOSTVDS_SERVER_ID: "${HOSTVDS_SERVER_ID:-}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      PORT: "8080"
+      SANMAO_URL_FILE: /config/sanmao.url
+      UPSTREAM_TIMEOUT_SECONDS: "${UPSTREAM_TIMEOUT_SECONDS:-15}"
+    volumes:
+      - ./config:/config:ro
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m

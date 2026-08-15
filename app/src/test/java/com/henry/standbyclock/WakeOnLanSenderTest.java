@@ -7,9 +7,9 @@ import org.junit.Test;
 public final class WakeOnLanSenderTest {
     @Test
     public void magicPacketHasHeaderAndSixteenMacCopies() {
-        byte[] packet = WakeOnLanSender.buildMagicPacket("8C:32:23:49:15:3F");
+        byte[] packet = WakeOnLanSender.buildMagicPacket("00:11:22:33:44:55");
         byte[] mac = {
-                (byte) 0x8C, 0x32, 0x23, 0x49, 0x15, 0x3F
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55
         };
 
         assertEquals(102, packet.length);

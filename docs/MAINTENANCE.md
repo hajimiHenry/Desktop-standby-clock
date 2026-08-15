@@ -25,6 +25,9 @@ validated by this project.
 | --- | --- |
 | `MainActivity` | Owns the fullscreen landscape window, immersive mode, style persistence and hourly rotation, brightness override, touch interaction, and service connection. |
 | `ClockView` | Draws both clock faces plus bedtime and settings overlays with Android Canvas. It also owns swipe recognition, pixel shifting, one-second invalidation, and pure-black rendering. |
+| `TrafficStatusClient` | Reads the private VPS bridge, bounds the response size, and parses independent HostVDS and Sanmao provider states. |
+| `TrafficStatusFormatting` | Converts provider values, stale states, reset dates, and expiry dates into fixed English-only overlay strings. |
+| `standby-clock.properties` | Untracked build-time values for LAN devices, Wake-on-LAN, provider labels, and the traffic bridge endpoint. |
 | `ClockStyleSwitching` | Contains the pure vertical-gesture and one-hour deadline rules covered by local unit tests. |
 | `StandbyService` | Monitors the ambient-light sensor, owns visible/blackout state, runs the bedtime schedule, and restores the clock task after removal. |
 | `AmbientLightPolicy` | Contains the pure hysteresis and temporal-confirmation rules covered by local unit tests. |
@@ -79,6 +82,38 @@ pending deadline.
 Alarm support is deliberately outside the current scope. The bedtime reminder is a
 short-chime in-app prompt and must not acquire repeating alarm sounds, vibration, or
 system alarm UI without a separate product decision.
+
+## Traffic status contract
+
+- A horizontally dominant right swipe opens `DEVICE CONTROL`; a left swipe opens
+  `TRAFFIC STATUS`. A horizontal swipe or ordinary tap closes either overlay.
+- The Android app reads `traffic.statusUrl` from the ignored
+  `standby-clock.properties` file. Cleartext traffic is supported for a read-only,
+  low-sensitivity personal endpoint.
+- The phone never stores the HostVDS Cookie or the Sanmao subscription URL. Those
+  secrets live only under the deployed bridge's `config/` directory.
+- The VPS bridge is maintained in `vps/traffic-status`, runs as unprivileged UID 1000
+  in Docker, and exposes only `GET /traffic`, `HEAD`, and `GET /healthz`.
+- HostVDS values use the provider billing formula and decimal GB. Sanmao values use
+  the standard `Subscription-Userinfo` response header and binary GiB.
+- Each provider fails independently. A failed refresh preserves its last successful
+  values and marks them stale; an expired HostVDS session is displayed as
+  `COOKIE EXPIRED`, never as zero remaining traffic.
+- The bridge cache lifetime is ten minutes. Opening the traffic overlay requests the
+  bridge immediately, while the bridge prevents excessive upstream polling.
+
+Copy `standby-clock.properties.example` to `standby-clock.properties` before a
+configured Android build. Missing values intentionally produce `NOT CONFIGURED`
+instead of a network request. The optional `STANDBY_CLOCK_CONFIG` environment
+variable can select a different properties file for CI or alternate installations.
+
+On the VPS, copy `.env.example` to `.env` and the two `config/*.example` files to
+their names without `.example`. Update the HostVDS session without placing it in
+shell history:
+
+```bash
+ssh -t henry-vps '/home/henry/traffic-status/set-hostvds-cookie'
+```
 
 ## Bedtime reminder contract
 

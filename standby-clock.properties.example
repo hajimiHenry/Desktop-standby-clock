@@ -1,0 +1,13 @@
+# Copy this file to standby-clock.properties and replace the example values.
+# standby-clock.properties is intentionally ignored by Git.
+
+yeelight.host=192.168.50.20
+yeelight.port=55443
+
+desktop.mac=00:11:22:33:44:55
+wol.broadcastHost=192.168.50.255
+wol.port=9
+
+traffic.statusUrl=http://YOUR_VPS_IP:18080/traffic
+traffic.hostLabel=HOSTVDS
+traffic.subscriptionLabel=SUBSCRIPTION

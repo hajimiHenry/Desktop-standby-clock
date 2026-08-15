@@ -18,17 +18,28 @@ dedicated desktop display.
 - Five-minute pixel shifting for OLED burn-in protection
 - Persistent bedtime reminder with a short CRT-style chime
 - Local controls for a Yeelight ceiling light and Wake-on-LAN desktop startup
+- HostVDS and Sanmao remaining-traffic status from a private VPS bridge
 - Dedicated-display recovery after boot or task removal on a rooted MIUI phone
 
 ## Controls
 
 - Swipe up or down: change clock face
-- Swipe left or right: open or close device controls
+- Swipe right: open device controls
+- Swipe left: open the HostVDS and Sanmao traffic dashboard
 - Long press: open clock settings
 
 ## Build
 
 Requires JDK 17 and Android SDK Platform 35.
+
+Copy the tracked template and fill in your own LAN devices and VPS endpoint:
+
+```bash
+cp standby-clock.properties.example standby-clock.properties
+```
+
+The local file is ignored by Git. A checkout without it still builds; device
+controls and the traffic dashboard show `NOT CONFIGURED` until values are supplied.
 
 ```bash
 ./gradlew testDebugUnitTest assembleDebug lintDebug
@@ -42,4 +53,5 @@ Release signing and publication are documented in
 ## Documentation
 
 Architecture, ambient-light thresholds, MIUI persistence, installation, verification,
-and troubleshooting are documented in [docs/MAINTENANCE.md](docs/MAINTENANCE.md).
+traffic-bridge setup, and troubleshooting are documented in
+[docs/MAINTENANCE.md](docs/MAINTENANCE.md).

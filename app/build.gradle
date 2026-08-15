@@ -2,6 +2,34 @@ plugins {
     id "com.android.application"
 }
 
+def standbyConfigPath = System.getenv("STANDBY_CLOCK_CONFIG")
+def standbyConfigFile = rootProject.file(
+        standbyConfigPath == null || standbyConfigPath.trim().isEmpty()
+                ? "standby-clock.properties"
+                : standbyConfigPath)
+def standbyConfig = new Properties()
+if (standbyConfigFile.isFile()) {
+    standbyConfigFile.withInputStream { standbyConfig.load(it) }
+}
+
+def configString = { String key, String fallback = "" ->
+    String value = standbyConfig.getProperty(key, fallback).trim()
+    return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+}
+def configPort = { String key, int fallback ->
+    String raw = standbyConfig.getProperty(key, Integer.toString(fallback)).trim()
+    int value
+    try {
+        value = Integer.parseInt(raw)
+    } catch (NumberFormatException exception) {
+        throw new GradleException("${key} must be an integer port", exception)
+    }
+    if (value < 1 || value > 65535) {
+        throw new GradleException("${key} must be between 1 and 65535")
+    }
+    return value
+}
+
 def releaseSigning = [
         storeFile: System.getenv("STANDBY_CLOCK_KEYSTORE"),
         storePassword: System.getenv("STANDBY_CLOCK_STORE_PASSWORD"),
@@ -22,6 +50,18 @@ android {
         targetSdk 35
         versionCode 1
         versionName "0.1.0"
+
+        buildConfigField "String", "YEELIGHT_HOST", configString("yeelight.host")
+        buildConfigField "int", "YEELIGHT_PORT", Integer.toString(
+                configPort("yeelight.port", 55443))
+        buildConfigField "String", "DESKTOP_MAC", configString("desktop.mac")
+        buildConfigField "String", "WOL_BROADCAST_HOST", configString("wol.broadcastHost")
+        buildConfigField "int", "WOL_PORT", Integer.toString(configPort("wol.port", 9))
+        buildConfigField "String", "TRAFFIC_STATUS_URL", configString("traffic.statusUrl")
+        buildConfigField "String", "TRAFFIC_HOST_LABEL", configString(
+                "traffic.hostLabel", "HOSTVDS")
+        buildConfigField "String", "TRAFFIC_SUBSCRIPTION_LABEL", configString(
+                "traffic.subscriptionLabel", "SUBSCRIPTION")
 
         ndk {
             abiFilters "arm64-v8a"
@@ -53,9 +93,14 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+
+    buildFeatures {
+        buildConfig true
+    }
 }
 
 dependencies {
     implementation "androidx.core:core:1.15.0"
     testImplementation "junit:junit:4.13.2"
+    testImplementation "org.json:json:20240303"
 }

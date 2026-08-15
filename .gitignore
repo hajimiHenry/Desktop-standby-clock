@@ -2,6 +2,13 @@
 .idea/
 .DS_Store
 local.properties
+standby-clock.properties
 **/build/
 dist/
 *.iml
+vps/traffic-status/.env
+vps/traffic-status/config/*
+!vps/traffic-status/config/.gitkeep
+!vps/traffic-status/config/*.example
+vps/traffic-status/data/*
+!vps/traffic-status/data/.gitkeep

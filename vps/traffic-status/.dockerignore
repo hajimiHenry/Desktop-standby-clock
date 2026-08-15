@@ -1,0 +1,5 @@
+config
+data
+test_app.py
+__pycache__
+*.pyc

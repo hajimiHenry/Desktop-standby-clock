@@ -31,6 +31,8 @@ public final class MainActivity extends Activity {
     private static final long STYLE_SWITCH_RETRY_MS = 500L;
     private final YeelightClient yeelightClient = new YeelightClient(
             DeviceControlConfig.YEELIGHT_HOST, DeviceControlConfig.YEELIGHT_PORT);
+    private final TrafficStatusClient trafficStatusClient = new TrafficStatusClient(
+            DeviceControlConfig.TRAFFIC_STATUS_URL);
     private final ExecutorService deviceControlExecutor = Executors.newSingleThreadExecutor();
     private ClockView clockView;
     private SharedPreferences clockPreferences;
@@ -41,6 +43,7 @@ public final class MainActivity extends Activity {
     private boolean autoStyleSwitchEnabled;
     private boolean lightRequestInFlight;
     private boolean wolRequestInFlight;
+    private boolean trafficRequestInFlight;
     private final Runnable autoStyleSwitch = this::handleAutoStyleSwitch;
     private final BroadcastReceiver statusReceiver = new BroadcastReceiver() {
         @Override
@@ -103,8 +106,15 @@ public final class MainActivity extends Activity {
         clockView.setOnDeviceMenuVisibilityListener(visible -> {
             sendSettingsOpen(visible);
             if (visible) {
-                clockView.setDesktopWakeStatus("READY");
-                refreshCeilingLight();
+                if (clockView.isTrafficMenuVisible()) {
+                    refreshTrafficStatus();
+                } else {
+                    clockView.setDesktopWakeStatus(
+                            DeviceControlConfig.isWakeOnLanConfigured()
+                                    ? "READY"
+                                    : "NOT CONFIGURED");
+                    refreshCeilingLight();
+                }
             }
         });
         clockView.setOnLongClickListener(view -> {
@@ -219,6 +229,10 @@ public final class MainActivity extends Activity {
     }
 
     private void runCeilingLightRequest(boolean toggle) {
+        if (!DeviceControlConfig.isYeelightConfigured()) {
+            clockView.setCeilingLightStatus("NOT CONFIGURED");
+            return;
+        }
         if (lightRequestInFlight) {
             return;
         }
@@ -244,6 +258,10 @@ public final class MainActivity extends Activity {
     }
 
     private void wakeDesktop() {
+        if (!DeviceControlConfig.isWakeOnLanConfigured()) {
+            clockView.setDesktopWakeStatus("NOT CONFIGURED");
+            return;
+        }
         if (wolRequestInFlight) {
             return;
         }
@@ -265,6 +283,35 @@ public final class MainActivity extends Activity {
             runOnUiThread(() -> {
                 wolRequestInFlight = false;
                 clockView.setDesktopWakeStatus(completedStatus);
+            });
+        });
+    }
+
+    private void refreshTrafficStatus() {
+        if (!DeviceControlConfig.isTrafficStatusConfigured()) {
+            clockView.setTrafficNotConfigured();
+            return;
+        }
+        if (trafficRequestInFlight) {
+            return;
+        }
+        trafficRequestInFlight = true;
+        clockView.setTrafficLoading();
+        deviceControlExecutor.execute(() -> {
+            TrafficStatusFormatting.Display display = null;
+            try {
+                display = TrafficStatusFormatting.format(trafficStatusClient.fetch());
+            } catch (Exception exception) {
+                Log.w(TAG, "Unable to refresh traffic status", exception);
+            }
+            TrafficStatusFormatting.Display completedDisplay = display;
+            runOnUiThread(() -> {
+                trafficRequestInFlight = false;
+                if (completedDisplay == null) {
+                    clockView.setTrafficOffline();
+                } else {
+                    clockView.setTrafficDisplay(completedDisplay);
+                }
             });
         });
     }
