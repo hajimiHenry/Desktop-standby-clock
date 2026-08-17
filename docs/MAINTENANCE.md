@@ -33,7 +33,7 @@ validated by this project.
 | `AmbientLightPolicy` | Contains the pure hysteresis and temporal-confirmation rules covered by local unit tests. |
 | `BedtimeSchedule` | Contains the deterministic daily-trigger and 15-minute adjustment calculations covered by local unit tests. |
 | `PersistenceReceiver` | Handles `BOOT_COMPLETED` and `MY_PACKAGE_REPLACED`, starts the foreground service, and restores the clock task. |
-| `RootShell` | Brings the existing clock task to the foreground after task removal or recovery. |
+| `RootShell` | Brings the clock task forward and reads the rooted phone's LAN neighbor table. |
 | `scripts/standby-clock-service.sh` | Magisk `service.d` boot helper for MIUI AppOps, Doze exclusion, service start, and task restore. |
 
 The app declares network access for its trusted-LAN device controls but declares no
@@ -106,6 +106,12 @@ Copy `standby-clock.properties.example` to `standby-clock.properties` before a
 configured Android build. Missing values intentionally produce `NOT CONFIGURED`
 instead of a network request. The optional `STANDBY_CLOCK_CONFIG` environment
 variable can select a different properties file for CI or alternate installations.
+
+Yeelight control stores both `yeelight.host` and `yeelight.mac`. The host remains a
+backward-compatible fallback, while the rooted dedicated phone resolves the stable MAC
+from `ip neigh`, caches the current address, and refreshes its `/24` Wi-Fi neighbors only
+after an address failure. A read-only protocol query verifies a recovered address before
+the app sends `toggle`, which is never automatically retried because it has side effects.
 
 On the VPS, copy `.env.example` to `.env` and the two `config/*.example` files to
 their names without `.example`. Update the HostVDS session without placing it in

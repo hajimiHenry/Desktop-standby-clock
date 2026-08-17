@@ -1,17 +1,28 @@
 package com.henry.standbyclock;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 
 /**
  * 以 root 身份执行 shell 命令的极简封装。
  *
- * <p>用途只有一个：这台手机是专职的桌面时钟，被系统或用户误划掉后要能自己回到前台。
- * 普通应用没权限把自己拉回前台（Android 10 起限制后台启动 Activity），
- * 所以借助已 root 的设备执行 `am start` 绕过。设备没 root 时 `su` 直接失败，
- * 调用方会退回到普通的 startActivity 兜底（见 PersistenceReceiver）。
+ * <p>主要用途有两个：恢复被划掉的专职时钟界面，以及读取局域网邻居表来按 MAC
+ * 找回 DHCP 已改地址的吸顶灯。设备没 root 时 `su` 直接失败，各调用方都有普通路径兜底。
  */
 final class RootShell {
+    /** root 命令的退出码和标准输出，供需要读取系统状态的调用方使用。 */
+    static final class Result {
+        final int exitCode;
+        final String output;
+
+        Result(int exitCode, String output) {
+            this.exitCode = exitCode;
+            this.output = output;
+        }
+    }
+
     private RootShell() {}
 
     /**
@@ -20,13 +31,23 @@ final class RootShell {
      * @return 进程退出码，0 表示成功
      */
     static int run(String command) throws IOException, InterruptedException {
+        return execute(command, false).exitCode;
+    }
+
+    /** 执行 root 命令并返回输出；只用于输出量很小的系统查询命令。 */
+    static Result capture(String command) throws IOException, InterruptedException {
+        return execute(command, true);
+    }
+
+    private static Result execute(String command, boolean captureOutput)
+            throws IOException, InterruptedException {
         Process process = new ProcessBuilder("su", "-c", command)
                 .redirectErrorStream(true)
                 .start();
         // 必须把输出读干净再 waitFor：管道缓冲区写满后子进程会阻塞，
         // 那样 waitFor 就会永远等下去（经典的死锁坑）。
-        drain(process.getInputStream());
-        return process.waitFor();
+        String output = read(process.getInputStream(), captureOutput);
+        return new Result(process.waitFor(), output);
     }
 
     /**
@@ -57,12 +78,18 @@ final class RootShell {
         }
     }
 
-    /** 读空并关闭子进程的输出流，内容丢弃即可。 */
-    private static void drain(InputStream input) throws IOException {
+    /** 持续读取并关闭子进程输出；调用方不需要内容时只排空管道。 */
+    private static String read(InputStream input, boolean keepOutput) throws IOException {
         byte[] buffer = new byte[512];
-        while (input.read(buffer) != -1) {
-            // 本应用用到的 root 命令没有需要展示给用户的输出，读掉是为了防阻塞。
+        ByteArrayOutputStream output = keepOutput ? new ByteArrayOutputStream() : null;
+        int count;
+        while ((count = input.read(buffer)) != -1) {
+            // 即使不需要内容也必须持续读取，防止子进程因管道写满而死锁。
+            if (output != null) {
+                output.write(buffer, 0, count);
+            }
         }
         input.close();
+        return output == null ? "" : output.toString(StandardCharsets.UTF_8.name());
     }
 }

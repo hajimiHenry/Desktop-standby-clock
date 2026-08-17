@@ -14,6 +14,8 @@ package com.henry.standbyclock;
 final class DeviceControlConfig {
     /** Yeelight 吸顶灯在局域网里的 IP 和端口。 */
     static final String YEELIGHT_HOST = BuildConfig.YEELIGHT_HOST;
+    /** 灯的固定 MAC，用于 DHCP 改地址后从本机邻居表重新找到它。 */
+    static final String YEELIGHT_MAC = BuildConfig.YEELIGHT_MAC;
     static final int YEELIGHT_PORT = BuildConfig.YEELIGHT_PORT;
 
     /** 要被网络唤醒的台式机 MAC 地址。 */
@@ -34,7 +36,11 @@ final class DeviceControlConfig {
     }
 
     static boolean isYeelightConfigured() {
-        return hasText(YEELIGHT_HOST);
+        return hasText(YEELIGHT_HOST) || isYeelightMacConfigured();
+    }
+
+    static boolean isYeelightMacConfigured() {
+        return YeelightAddressResolver.normalizeMac(YEELIGHT_MAC) != null;
     }
 
     /** 网络唤醒要 MAC 和广播地址两者齐全才算配好。 */

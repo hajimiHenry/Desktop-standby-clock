@@ -52,6 +52,7 @@ android {
         versionName "0.1.0"
 
         buildConfigField "String", "YEELIGHT_HOST", configString("yeelight.host")
+        buildConfigField "String", "YEELIGHT_MAC", configString("yeelight.mac")
         buildConfigField "int", "YEELIGHT_PORT", Integer.toString(
                 configPort("yeelight.port", 55443))
         buildConfigField "String", "DESKTOP_MAC", configString("desktop.mac")

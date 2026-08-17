@@ -19,6 +19,7 @@ import android.view.WindowManager;
 
 import androidx.core.content.ContextCompat;
 
+import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -51,8 +52,9 @@ public final class MainActivity extends Activity {
      */
     private static final long STYLE_SWITCH_RETRY_MS = 500L;
 
-    private final YeelightClient yeelightClient = new YeelightClient(
-            DeviceControlConfig.YEELIGHT_HOST, DeviceControlConfig.YEELIGHT_PORT);
+    private final YeelightAddressResolver yeelightAddressResolver =
+            new YeelightAddressResolver(
+                    DeviceControlConfig.YEELIGHT_HOST, DeviceControlConfig.YEELIGHT_MAC);
     private final TrafficStatusClient trafficStatusClient = new TrafficStatusClient(
             DeviceControlConfig.TRAFFIC_STATUS_URL);
     /**
@@ -329,8 +331,8 @@ public final class MainActivity extends Activity {
             // 界面显示 OFFLINE 就够了，绝不能让时钟主体崩掉。
             try {
                 YeelightClient.PowerState state = toggle
-                        ? yeelightClient.toggle()
-                        : yeelightClient.getPower();
+                        ? toggleCeilingLightSafely()
+                        : queryCeilingLightWithRecovery();
                 status = state == YeelightClient.PowerState.ON ? "ON" : "OFF";
             } catch (Exception exception) {
                 Log.w(TAG, "Unable to control Yeelight ceiling light", exception);
@@ -344,6 +346,47 @@ public final class MainActivity extends Activity {
                 clockView.setCeilingLightStatus(completedStatus);
             });
         });
+    }
+
+    /** 状态查询没有副作用，地址失效时可以安全地按 MAC 刷新地址并重试一次。 */
+    private YeelightClient.PowerState queryCeilingLightWithRecovery() throws IOException {
+        YeelightClient client = clientForResolvedAddress(false);
+        try {
+            return client.getPower();
+        } catch (IOException firstFailure) {
+            yeelightAddressResolver.invalidate();
+            YeelightClient recoveredClient = clientForResolvedAddress(true);
+            return recoveredClient.getPower();
+        }
+    }
+
+    /**
+     * toggle 有副作用，绝不能在响应丢失时盲目重发，否则可能开完又关。
+     * 因此先用只读查询验证地址；只有验证阶段允许重新解析，toggle 本身只发送一次。
+     */
+    private YeelightClient.PowerState toggleCeilingLightSafely() throws IOException {
+        YeelightClient client = clientForResolvedAddress(false);
+        try {
+            client.getPower();
+        } catch (IOException firstFailure) {
+            yeelightAddressResolver.invalidate();
+            client = clientForResolvedAddress(true);
+            client.getPower();
+        }
+
+        try {
+            return client.toggle();
+        } catch (IOException toggleFailure) {
+            // 下次操作重新按 MAC 解析，但本次不能重发有副作用的命令。
+            yeelightAddressResolver.invalidate();
+            throw toggleFailure;
+        }
+    }
+
+    private YeelightClient clientForResolvedAddress(boolean forceRefresh) throws IOException {
+        String host = yeelightAddressResolver.resolve(forceRefresh);
+        Log.i(TAG, "yeelight_host=" + host + " forced_refresh=" + forceRefresh);
+        return new YeelightClient(host, DeviceControlConfig.YEELIGHT_PORT);
     }
 
     /**
