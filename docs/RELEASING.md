@@ -39,12 +39,12 @@ verifies the APK signature and writes the APK plus its SHA-256 checksum to
 After reviewing the changes and artifacts:
 
 ```bash
-git tag -a v0.1.0 -m "Desktop Standby Clock v0.1.0"
+git tag -a v0.1.1 -m "Desktop Standby Clock v0.1.1"
 git push origin main
-git push origin v0.1.0
-gh release create v0.1.0 \
-  dist/Desktop-Standby-Clock-v0.1.0.apk \
-  dist/Desktop-Standby-Clock-v0.1.0.apk.sha256 \
-  --title "Desktop Standby Clock v0.1.0" \
-  --notes-file docs/releases/v0.1.0.md
+git push origin v0.1.1
+gh release create v0.1.1 \
+  dist/Desktop-Standby-Clock-v0.1.1.apk \
+  dist/Desktop-Standby-Clock-v0.1.1.apk.sha256 \
+  --title "Desktop Standby Clock v0.1.1" \
+  --notes-file docs/releases/v0.1.1.md
 ```
