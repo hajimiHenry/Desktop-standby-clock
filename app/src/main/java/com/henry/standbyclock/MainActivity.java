@@ -22,29 +22,69 @@ import androidx.core.content.ContextCompat;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+/**
+ * 应用唯一的界面。职责有三块：
+ *
+ * <ol>
+ *   <li><b>做一块纯粹的显示屏</b>：全屏沉浸、常亮、隐藏状态栏导航栏、锁屏上也显示、
+ *       屏蔽返回键，让这台手机看起来不像手机。</li>
+ *   <li><b>转发用户操作</b>：ClockView 只负责画和识别点了哪儿，实际动作（改就寝时间、
+ *       开灯、唤醒电脑）由这里执行——需要联网的丢子线程，属于后台状态的发给
+ *       StandbyService。</li>
+ *   <li><b>管表盘轮换</b>：定时自动切换表盘，并把选择持久化。</li>
+ * </ol>
+ *
+ * <p>为什么状态要分给 StandbyService 管：Activity 会被系统随时销毁重建，
+ * 而环境光监测和睡眠提醒必须一直活着。所以这里只保存 UI 相关的偏好，
+ * 真正的后台状态在 Service 里，两者通过广播同步。
+ */
 public final class MainActivity extends Activity {
     private static final String TAG = "StandbyClock";
     private static final String CLOCK_PREFERENCES = "clock_preferences";
     private static final String KEY_CLOCK_STYLE = "clock_style";
     private static final String KEY_AUTO_STYLE_SWITCH_ENABLED = "auto_style_switch_enabled";
+    /** 下次自动切表盘的绝对时间戳，存起来是为了熄屏／重启后倒计时能接着走。 */
     private static final String KEY_NEXT_AUTO_STYLE_SWITCH_AT = "next_auto_style_switch_at";
+    /**
+     * 自动切换被拒绝时的重试间隔。切换会被拒绝是因为上一次切换动画还没播完
+     * （见 ClockView.animateClockStyle），过 500ms 再试一次即可。
+     */
     private static final long STYLE_SWITCH_RETRY_MS = 500L;
+
     private final YeelightClient yeelightClient = new YeelightClient(
             DeviceControlConfig.YEELIGHT_HOST, DeviceControlConfig.YEELIGHT_PORT);
     private final TrafficStatusClient trafficStatusClient = new TrafficStatusClient(
             DeviceControlConfig.TRAFFIC_STATUS_URL);
+    /**
+     * 所有联网操作（控灯、发唤醒包、查流量）都排在这一条线程上。
+     * 用单线程而不是线程池：这些操作都由用户手动触发、频率极低，
+     * 串行执行反而天然避免了并发发多个请求。
+     */
     private final ExecutorService deviceControlExecutor = Executors.newSingleThreadExecutor();
+
     private ClockView clockView;
     private SharedPreferences clockPreferences;
+    /** 自动切表盘的定时器，跑在主线程。 */
     private final Handler autoStyleHandler = new Handler(Looper.getMainLooper());
     private boolean statusReceiverRegistered;
+
+    /** 以下两个是 Service 广播过来的状态副本，用于决定屏幕亮度。 */
     private boolean displayBlackout;
     private boolean bedtimeReminderActive;
+
     private boolean autoStyleSwitchEnabled;
+
+    /**
+     * 三个"请求进行中"标记，防止用户连点导致重复发请求。
+     * 只在主线程读写，所以不用加锁。
+     */
     private boolean lightRequestInFlight;
     private boolean wolRequestInFlight;
     private boolean trafficRequestInFlight;
+
     private final Runnable autoStyleSwitch = this::handleAutoStyleSwitch;
+
+    /** 接收 StandbyService 广播来的熄屏状态和睡眠提醒状态。 */
     private final BroadcastReceiver statusReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -53,6 +93,8 @@ public final class MainActivity extends Activity {
             } else if (StandbyService.ACTION_BEDTIME_STATE.equals(intent.getAction())) {
                 bedtimeReminderActive = intent.getBooleanExtra(
                         StandbyService.EXTRA_BEDTIME_ACTIVE, false);
+                // 先记下有没有浮层开着：睡眠提醒会强行盖掉浮层，
+                // 得在那之前把状态取出来，好在下面通知 Service 浮层已经关了。
                 boolean overlayWasVisible = clockView.isSettingsVisible()
                         || clockView.isDeviceMenuVisible();
                 clockView.setBedtimeState(
@@ -63,6 +105,8 @@ public final class MainActivity extends Activity {
                         intent.getBooleanExtra(StandbyService.EXTRA_BEDTIME_SNOOZED, false),
                         intent.getBooleanExtra(
                                 StandbyService.EXTRA_BEDTIME_SOUND_ENABLED, true));
+                // 浮层被提醒挤掉了，要告诉 Service 一声。因为浮层打开期间 Service 会
+                // 暂时压住自动熄屏（用户正在操作，不能黑屏），现在得解除这个压制。
                 if (bedtimeReminderActive && overlayWasVisible) {
                     sendSettingsOpen(false);
                 }
@@ -75,19 +119,26 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        // --- 把窗口调教成一块专职显示屏 ---
         Window window = getWindow();
+        // 永不自动息屏。这是时钟的根本前提。
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        // 系统栏涂成纯黑，跟表盘背景无缝衔接（沉浸模式下偶尔被划出来时也不突兀）。
         window.setStatusBarColor(0xFF000000);
         window.setNavigationBarColor(0xFF000000);
 
         WindowManager.LayoutParams attributes = window.getAttributes();
+        // 允许内容延伸到刘海／挖孔区域，否则横屏时两侧会留黑边。
         attributes.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        // 关掉窗口进出动画，配合下面的 overridePendingTransition(0, 0)。
+        // 时钟被重新拉起时不该有淡入闪动，要像一直没动过一样。
         attributes.windowAnimations = 0;
         attributes.rotationAnimation =
                 WindowManager.LayoutParams.ROTATION_ANIMATION_SEAMLESS;
         window.setAttributes(attributes);
 
+        // 锁屏之上直接显示，并且能主动点亮屏幕——这样重启后无需解锁就能看到时钟。
         setShowWhenLocked(true);
         setTurnScreenOn(true);
 
@@ -95,14 +146,18 @@ public final class MainActivity extends Activity {
         autoStyleSwitchEnabled = clockPreferences.getBoolean(
                 KEY_AUTO_STYLE_SWITCH_ENABLED, true);
 
+        // 整个界面只有这一个 View，没有 XML 布局，所有内容都是它在 onDraw 里画出来的。
         clockView = new ClockView(this);
         clockView.setClockStyle(
                 ClockStyle.fromKey(clockPreferences.getString(KEY_CLOCK_STYLE, null)));
         clockView.setAutoStyleSwitchEnabled(autoStyleSwitchEnabled);
+        // 上下滑动切表盘。第二个参数 true 表示手动切换要重置自动轮换的倒计时——
+        // 刚手动选了一个，不该几秒后就被自动切走。
         clockView.setOnStyleSwipeListener(next -> applyClockStyle(
                 next ? clockView.getClockStyle().next() : clockView.getClockStyle().previous(),
                 true,
                 next));
+        // 左右滑动打开面板时，顺便触发一次数据刷新：面板一打开就该显示最新状态。
         clockView.setOnDeviceMenuVisibilityListener(visible -> {
             sendSettingsOpen(visible);
             if (visible) {
@@ -117,6 +172,7 @@ public final class MainActivity extends Activity {
                 }
             }
         });
+        // 长按打开设置浮层。
         clockView.setOnLongClickListener(view -> {
             sendSettingsOpen(clockView.toggleSettings());
             return true;
@@ -125,8 +181,14 @@ public final class MainActivity extends Activity {
         setContentView(clockView);
         enterImmersiveMode();
         startStandbyService();
+        // 去掉 Activity 启动过渡动画，理由同上面的 windowAnimations = 0。
         overridePendingTransition(0, 0);
     }
+
+    /**
+     * 时钟任务已经在前台时又被重新拉起会走这里（比如 root 脚本执行 am start，
+     * 或用户点了桌面图标）。此时不重建界面，只把沉浸模式和服务重新确认一遍。
+     */
 
     @Override
     protected void onNewIntent(Intent intent) {
@@ -142,12 +204,16 @@ public final class MainActivity extends Activity {
         super.onStart();
         IntentFilter filter = new IntentFilter(StandbyService.ACTION_DISPLAY_MODE);
         filter.addAction(StandbyService.ACTION_BEDTIME_STATE);
+        // RECEIVER_NOT_EXPORTED：只接收本应用发的广播，别的应用发不进来。
+        // Android 13 起注册运行时广播必须显式声明导出与否。
         ContextCompat.registerReceiver(
                 this,
                 statusReceiver,
                 filter,
                 ContextCompat.RECEIVER_NOT_EXPORTED);
         statusReceiverRegistered = true;
+        // 刚注册好接收器，主动问 Service 要一次当前状态。否则得干等到下次状态变化，
+        // 期间界面显示的可能是过期的（比如息屏前是熄屏状态，回来却画着表盘）。
         sendServiceAction(StandbyService.ACTION_REQUEST_STATUS);
         resumeAutoStyleSwitch();
     }
@@ -157,6 +223,14 @@ public final class MainActivity extends Activity {
         applyDisplayState();
     }
 
+    /**
+     * 根据熄屏 / 睡眠提醒两个状态，决定屏幕该多亮。三档：
+     * 熄屏时亮度压到 0 并画纯黑（OLED 像素完全不发光）；
+     * 睡眠提醒时用 10% 的极暗亮度（夜里看得见但不刺眼）；
+     * 其余情况交还给系统自动亮度。
+     *
+     * <p>注意熄屏与提醒同时成立时提醒优先——提醒本来就是要在漆黑的房间里叫醒你的。
+     */
     private void applyDisplayState() {
         boolean effectiveBlackout = displayBlackout && !bedtimeReminderActive;
         clockView.setBlackout(effectiveBlackout);
@@ -172,6 +246,10 @@ public final class MainActivity extends Activity {
         window.setAttributes(attributes);
     }
 
+    /**
+     * 处理一次点击。ClockView 只负责把"点在哪个坐标"翻译成一个语义化的动作枚举，
+     * 具体做什么在这里决定——这样按钮位置的调整不会牵扯到业务逻辑。
+     */
     private void handleClockTap() {
         ClockView.UiAction action = clockView.resolveTapAction();
         switch (action) {
@@ -228,6 +306,13 @@ public final class MainActivity extends Activity {
         runCeilingLightRequest(true);
     }
 
+    /**
+     * 控灯的统一入口。三种请求（控灯、唤醒电脑、查流量）都是同一套模式：
+     * 先查配置齐不齐 → 查有没有正在进行的请求 → 界面立刻显示"进行中"给用户反馈 →
+     * 丢到子线程执行 → 结果切回主线程更新界面。
+     *
+     * @param toggle true = 翻转开关，false = 只查询当前状态（打开面板时用）
+     */
     private void runCeilingLightRequest(boolean toggle) {
         if (!DeviceControlConfig.isYeelightConfigured()) {
             clockView.setCeilingLightStatus("NOT CONFIGURED");
@@ -240,6 +325,8 @@ public final class MainActivity extends Activity {
         clockView.setCeilingLightStatus(toggle ? "SWITCHING..." : "CHECKING...");
         deviceControlExecutor.execute(() -> {
             String status;
+            // 捕获所有异常而不只是 IOException：灯离线只是个小功能失灵，
+            // 界面显示 OFFLINE 就够了，绝不能让时钟主体崩掉。
             try {
                 YeelightClient.PowerState state = toggle
                         ? yeelightClient.toggle()
@@ -249,6 +336,8 @@ public final class MainActivity extends Activity {
                 Log.w(TAG, "Unable to control Yeelight ceiling light", exception);
                 status = "OFFLINE";
             }
+            // lambda 捕获的变量必须是 final 或事实 final，status 上面被重新赋过值，
+            // 所以要转存一个新变量才能带进下面的 lambda。
             String completedStatus = status;
             runOnUiThread(() -> {
                 lightRequestInFlight = false;
@@ -257,6 +346,10 @@ public final class MainActivity extends Activity {
         });
     }
 
+    /**
+     * 发网络唤醒包开机台式机。注意只能报告"包已发出"，无法知道对方是否真的开机了——
+     * WOL 是单向的 UDP 广播，没有任何回执。
+     */
     private void wakeDesktop() {
         if (!DeviceControlConfig.isWakeOnLanConfigured()) {
             clockView.setDesktopWakeStatus("NOT CONFIGURED");
@@ -298,6 +391,8 @@ public final class MainActivity extends Activity {
         trafficRequestInFlight = true;
         clockView.setTrafficLoading();
         deviceControlExecutor.execute(() -> {
+            // 用 null 表示失败：出错时走 setTrafficOffline()，它会保留上次成功的
+            // 数字并打上 STALE 标记，而不是把屏幕清空。
             TrafficStatusFormatting.Display display = null;
             try {
                 display = TrafficStatusFormatting.format(trafficStatusClient.fetch());
@@ -316,8 +411,17 @@ public final class MainActivity extends Activity {
         });
     }
 
+    /**
+     * 切换表盘并持久化。
+     *
+     * @param resetAutoSwitchCountdown 是否重置自动轮换倒计时。用户手动切时传 true，
+     *                                 自动轮换自己触发时传 false（它会自己重新计时）
+     * @param next                     切换方向，只影响动画往哪个方向推
+     * @return false 表示这次切换没做成——上一次动画还在播。调用方需要稍后重试
+     */
     private boolean applyClockStyle(
             ClockStyle style, boolean resetAutoSwitchCountdown, boolean next) {
+        // 熄屏状态下没必要播动画（反正是黑的），直接换掉即可。
         if (clockView.isBlackout()) {
             clockView.setClockStyle(style);
         } else if (!clockView.animateClockStyle(style, next)) {
@@ -344,6 +448,18 @@ public final class MainActivity extends Activity {
         }
     }
 
+    /**
+     * 界面回到前台时恢复自动轮换。
+     *
+     * <p>倒计时用的是持久化的绝对时间戳而不是"还剩多少分钟"，因为 Activity 在后台时
+     * Handler 定时器已经被取消了。回来时对照存的时间戳分三种情况：
+     *
+     * <ul>
+     *   <li>已经过点了 → 立刻切一次，然后重新计时</li>
+     *   <li>存的时间戳不可信（超过一个完整间隔，说明系统时钟被改过）→ 重新计时</li>
+     *   <li>正常的将来时刻 → 接着原来的倒计时走完剩余部分</li>
+     * </ul>
+     */
     private void resumeAutoStyleSwitch() {
         autoStyleHandler.removeCallbacks(autoStyleSwitch);
         if (!autoStyleSwitchEnabled) {
@@ -356,6 +472,7 @@ public final class MainActivity extends Activity {
             if (applyClockStyle(clockView.getClockStyle().next(), false, true)) {
                 resetAutoStyleSwitchCountdown(nowMs);
             } else {
+                // 有动画在播，切不了，过 500ms 再试。
                 autoStyleHandler.postDelayed(autoStyleSwitch, STYLE_SWITCH_RETRY_MS);
             }
         } else if (!ClockStyleSwitching.isUsableFutureTime(nextSwitchAtMs, nowMs)) {
@@ -364,6 +481,8 @@ public final class MainActivity extends Activity {
             scheduleAutoStyleSwitch(nextSwitchAtMs, nowMs);
         }
     }
+
+    /** 倒计时到点时的回调：切下一个表盘，然后重新开始计时。 */
 
     private void handleAutoStyleSwitch() {
         if (!autoStyleSwitchEnabled) {
@@ -377,6 +496,7 @@ public final class MainActivity extends Activity {
         }
     }
 
+    /** 重新开始一个完整的轮换周期：算出下次时间、存盘、安排定时器。 */
     private void resetAutoStyleSwitchCountdown(long nowMs) {
         long nextSwitchAtMs = ClockStyleSwitching.nextAutoSwitchAt(nowMs);
         clockPreferences.edit()
@@ -386,10 +506,18 @@ public final class MainActivity extends Activity {
     }
 
     private void scheduleAutoStyleSwitch(long nextSwitchAtMs, long nowMs) {
+        // 先取消旧的，防止重复排期导致一次到点切两下。
+        // 延迟至少 1ms：postDelayed 传 0 或负数会立即执行，可能造成递归重入。
         autoStyleHandler.removeCallbacks(autoStyleSwitch);
         autoStyleHandler.postDelayed(autoStyleSwitch, Math.max(1L, nextSwitchAtMs - nowMs));
     }
 
+    /**
+     * 界面不可见时收尾：停掉定时器、关掉所有浮层、注销广播接收器。
+     *
+     * <p>关浮层是有意为之——下次回到前台应该是干净的表盘，而不是几小时前忘了关的
+     * 设置界面。
+     */
     @Override
     protected void onStop() {
         autoStyleHandler.removeCallbacks(autoStyleSwitch);
@@ -417,6 +545,11 @@ public final class MainActivity extends Activity {
         super.onDestroy();
     }
 
+    // --- 以下四个方法都是给 StandbyService 发指令 ---
+    // 统一用 startForegroundService + Intent 的 action 来传，而不是 bindService：
+    // 这些都是"发完就不管"的单向通知，不需要拿返回值，也就不必维护绑定的生命周期。
+    // 服务已经在跑时，重复调用只会走一次 onStartCommand，不会重建服务。
+
     private void startStandbyService() {
         Intent intent = new Intent(this, StandbyService.class);
         startForegroundService(intent);
@@ -434,6 +567,10 @@ public final class MainActivity extends Activity {
         startForegroundService(intent);
     }
 
+    /**
+     * 告诉 Service 浮层开着还是关着。Service 收到后会在浮层打开期间压住自动熄屏——
+     * 用户正在操作设置界面，这时候黑屏就太傻了。
+     */
     private void sendSettingsOpen(boolean open) {
         Intent intent = new Intent(this, StandbyService.class)
                 .setAction(StandbyService.ACTION_SET_SETTINGS_OPEN)
@@ -454,6 +591,12 @@ public final class MainActivity extends Activity {
         super.onPause();
     }
 
+    /**
+     * 重新拿到焦点时再进一次沉浸模式。
+     *
+     * <p>必须有这个：用户从屏幕边缘划出系统栏后，或者任何弹窗消失后，
+     * 系统栏不会自己再藏回去，得手动重新申请。
+     */
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
@@ -462,12 +605,23 @@ public final class MainActivity extends Activity {
         }
     }
 
+    /** 故意留空：这台手机是专职时钟，返回键不该退出，得让时钟一直在前台。 */
     @SuppressWarnings("deprecation")
     @Override
     public void onBackPressed() {
         // This phone is a dedicated clock. Keep the single clock task in front.
     }
 
+    /**
+     * 进入全屏沉浸模式，藏掉状态栏和导航栏。
+     *
+     * <p>这里两套 API 都调了：新的 WindowInsetsController（Android 11+）和旧的
+     * setSystemUiVisibility（已废弃）。看着冗余，但在 MIUI 这类深度定制系统上
+     * 单用新 API 有时藏不干净，两套一起下才稳，所以保留并加了 @SuppressWarnings。
+     *
+     * <p>BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE 的意思是：用户从边缘划入时系统栏
+     * 临时浮现，过几秒自动消失，不会把界面顶开。
+     */
     @SuppressWarnings("deprecation")
     private void enterImmersiveMode() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {

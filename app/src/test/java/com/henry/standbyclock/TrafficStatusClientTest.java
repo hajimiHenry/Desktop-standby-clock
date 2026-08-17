@@ -6,7 +6,12 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
+/**
+ * 流量看板的解析和展示测试。用写死的 JSON 字符串喂进去，
+ * 所以不需要真的连 VPS 就能验证完整链路（解析 → 格式化 → 屏幕文字）。
+ */
 public final class TrafficStatusClientTest {
+    /** 没配置时要有明确提示，而且页脚直接告诉用户去复制哪个配置模板。 */
     @Test
     public void missingLocalConfigHasAnExplicitDashboardState() {
         TrafficStatusFormatting.Display display =
@@ -17,6 +22,11 @@ public final class TrafficStatusClientTest {
         assertEquals("COPY STANDBY-CLOCK.PROPERTIES.EXAMPLE", display.footer);
     }
 
+    /**
+     * 解析服务端返回的完整 JSON。注意两个来源的单位不同：
+     * HostVDS 用 GB（1000 进制），机场用 GiB（1024 进制），解析时不能混。
+     * 机场那一栏还是"已超量"的场景：remaining 为 0、over 为 9.439。
+     */
     @Test
     public void parsesBridgeResponse() throws Exception {
         TrafficStatusClient.Snapshot snapshot = TrafficStatusClient.parse(
@@ -38,6 +48,11 @@ public final class TrafficStatusClientTest {
         assertTrue(snapshot.hostvds.hasUsage());
     }
 
+    /**
+     * 混合场景的展示效果：HostVDS 那栏认证过期了但仍有缓存数字，
+     * 所以主数字照常显示，第三行打上 "STALE · COOKIE EXPIRED"；
+     * 机场那栏正常，但已超量，明细行显示超出多少而不是"已用/总量"。
+     */
     @Test
     public void formatsUsageAndProviderFailure() throws Exception {
         TrafficStatusClient.Snapshot snapshot = TrafficStatusClient.parse(
@@ -60,6 +75,10 @@ public final class TrafficStatusClientTest {
         assertEquals("EXPIRES APR 25", display.sanmaoMeta);
     }
 
+    /**
+     * 从没成功过就失败时，"加载中"这个占位不该被当成有效数据保留下来，
+     * 而要老实换成 OFFLINE。（相对地，有过真实数据时会保留旧数字并标 STALE。）
+     */
     @Test
     public void firstNetworkFailureReplacesLoadingState() {
         TrafficStatusFormatting.Display display = TrafficStatusFormatting.offline(

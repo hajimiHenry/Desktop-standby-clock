@@ -4,7 +4,13 @@ import static org.junit.Assert.assertEquals;
 
 import org.junit.Test;
 
+/** 网络唤醒魔术包的构造测试。只测包体拼装，不真的发网络请求。 */
 public final class WakeOnLanSenderTest {
+    /**
+     * 逐字节核对魔术包的标准格式：
+     * 总长必须是 102 字节（6 + 6×16），前 6 个字节全是 0xFF，
+     * 之后是 MAC 地址原样重复 16 遍。
+     */
     @Test
     public void magicPacketHasHeaderAndSixteenMacCopies() {
         byte[] packet = WakeOnLanSender.buildMagicPacket("00:11:22:33:44:55");
@@ -23,6 +29,7 @@ public final class WakeOnLanSenderTest {
         }
     }
 
+    /** MAC 地址格式不对必须直接抛异常，而不是默默发一个无效包出去。 */
     @Test(expected = IllegalArgumentException.class)
     public void invalidMacAddressIsRejected() {
         WakeOnLanSender.buildMagicPacket("not-a-mac");
