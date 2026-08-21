@@ -10,7 +10,9 @@ services:
       CACHE_FILE: /data/cache.json
       CACHE_TTL_SECONDS: "${CACHE_TTL_SECONDS:-600}"
       HOSTVDS_COOKIE_FILE: /config/hostvds.cookie
+      HOSTVDS_CREDENTIALS_FILE: /config/hostvds.credentials
       HOSTVDS_SERVER_ID: "${HOSTVDS_SERVER_ID:-}"
+      HOSTVDS_TOKEN_CACHE_FILE: /data/hostvds-token.json
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       PORT: "8080"
       SANMAO_URL_FILE: /config/sanmao.url

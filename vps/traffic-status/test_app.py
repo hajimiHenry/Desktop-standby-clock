@@ -4,9 +4,20 @@
 运行方式：在 vps/traffic-status 目录下执行 `python3 -m unittest test_app`。
 """
 
+import base64
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
-from app import ProviderFailure, _failure_state, parse_hostvds, parse_subscription_userinfo
+from app import (
+    ProviderFailure,
+    _failure_state,
+    _jwt_expires_at,
+    _read_credentials,
+    parse_hostvds,
+    parse_subscription_userinfo,
+)
 
 
 class HostVdsParsingTest(unittest.TestCase):
@@ -84,6 +95,66 @@ class FailureStateTest(unittest.TestCase):
         self.assertEqual("auth_expired", state["status"])
         self.assertTrue(state["stale"])
         self.assertEqual("now", state["attempted_at"])
+
+
+class CredentialsTest(unittest.TestCase):
+    """凭证文件解析测试。重点是不能破坏密码本身的字符。"""
+
+    def _write(self, text):
+        directory = tempfile.mkdtemp()
+        path = Path(directory) / "hostvds.credentials"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_preserves_password_characters_verbatim(self):
+        """密码里的空格、井号、反斜杠都必须原样保留——对 email 做 strip 是安全的，
+        对密码做 strip 会把合法字符吃掉，那种 bug 极难排查。"""
+        path = self._write("  user@example.com  \n  pa ss#word\\x  \n")
+        email, password = _read_credentials(path)
+
+        self.assertEqual("user@example.com", email)
+        self.assertEqual("  pa ss#word\\x  ", password)
+
+    def test_tolerates_crlf_line_endings(self):
+        """凭证可能在别处编辑后传上来，行尾带 \r 不该导致密码错误。"""
+        path = self._write("user@example.com\r\nsecret\r\n")
+        self.assertEqual(("user@example.com", "secret"), _read_credentials(path))
+
+    def test_reports_not_configured_when_incomplete(self):
+        """只有邮箱没有密码时要报 not_configured，而不是拿空密码去登录。"""
+        path = self._write("user@example.com\n\n")
+        with self.assertRaises(ProviderFailure) as raised:
+            _read_credentials(path)
+        self.assertEqual("not_configured", raised.exception.code)
+
+    def test_reports_not_configured_when_missing(self):
+        """文件不存在等同于未配置，调用方据此回落到 Cookie 模式。"""
+        with self.assertRaises(ProviderFailure) as raised:
+            _read_credentials(Path(tempfile.mkdtemp()) / "absent")
+        self.assertEqual("not_configured", raised.exception.code)
+
+
+class JwtExpiryTest(unittest.TestCase):
+    """JWT 有效期解析测试。只解码不验签，所以样本可以随便造。"""
+
+    @staticmethod
+    def _token(claims):
+        def segment(data):
+            raw = json.dumps(data).encode("utf-8")
+            return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+        return f"{segment({'alg': 'HS256'})}.{segment(claims)}.signature"
+
+    def test_reads_expiry_claim(self):
+        """正常 JWT 应读出 exp。1786883633 是实际抓到的那个令牌的过期时间。"""
+        self.assertEqual(1786883633.0, _jwt_expires_at(self._token({"exp": 1786883633})))
+
+    def test_treats_unparsable_token_as_expired(self):
+        """段数不对、base64 坏掉、没有 exp——一律返回 0（视为已过期）。
+        这样调用方会重新登录，而不是攥着一个不知死活的令牌去发请求。"""
+        self.assertEqual(0.0, _jwt_expires_at("not-a-jwt"))
+        self.assertEqual(0.0, _jwt_expires_at("a.b.c"))
+        self.assertEqual(0.0, _jwt_expires_at(self._token({"user_id": 1})))
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -37,6 +38,8 @@ from urllib.request import Request, urlopen
 
 
 HOSTVDS_URL = "https://hostvds.com/api/products/?type=traffic"
+HOSTVDS_TOKEN_URL = "https://hostvds.com/api/token/"
+HOSTVDS_ORIGIN = "https://hostvds.com"
 HOSTVDS_REFERER = "https://hostvds.com/control/servers/list"
 HOSTVDS_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -46,6 +49,9 @@ HOSTVDS_USER_AGENT = (
 SANMAO_USER_AGENT = "clash-verge/v2.4.0"
 # 上游响应体大小上限 1MB，防御性措施，正常响应只有几 KB。
 MAX_RESPONSE_BYTES = 1_048_576
+# HostVDS 的 access token 是有效期 24 小时的 SimpleJWT。提前 5 分钟就当它过期，
+# 免得请求正好卡在失效的那一瞬间——多登录一次的代价远小于一次抓取失败。
+TOKEN_REFRESH_SKEW_SECONDS = 300
 # 1 GiB 的字节数。机场按 1024 进制算，HostVDS 按 1000 进制算，两者不能混用。
 GIB = 1024**3
 LOGGER = logging.getLogger("traffic-status")
@@ -258,23 +264,210 @@ def _read_limited(response: Any) -> bytes:
     return body
 
 
-def fetch_hostvds(cookie_file: Path, server_id: str, timeout_seconds: float) -> dict[str, Any]:
-    """向 HostVDS 发起请求并解析。请求头要伪装成浏览器，否则会被挡掉。"""
-    cookie = _read_secret(cookie_file)
+def _read_credentials(path: Path) -> tuple[str, str]:
+    """读取 HostVDS 登录凭证。文件两行：第一行邮箱，第二行密码。
+
+    不用 JSON 是因为密码里出现引号、反斜杠的概率不低，而两行纯文本无需任何转义，
+    人工用编辑器写入时不会因为转义写错而排查半天。
+
+    密码只去掉行尾的换行和回车，不做 strip：首尾空格在密码里是合法字符。
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ProviderFailure("not_configured") from error
+    lines = text.split("\n")
+    email = lines[0].strip() if lines else ""
+    password = lines[1].rstrip("\r") if len(lines) > 1 else ""
+    if not email or not password:
+        raise ProviderFailure("not_configured")
+    return email, password
+
+
+def _jwt_expires_at(token: str) -> float:
+    """从 JWT 里读出 exp（秒级时间戳）。读不出来返回 0。
+
+    这里只解码不验签——签名是给 HostVDS 服务端验的，我们只想知道什么时候该换新的。
+    读不出时返回 0，调用方会当成"已过期"从而立刻重新登录：宁可多登一次，
+    也不要攥着一个不知死活的令牌去请求。
+    """
+    parts = token.split(".")
+    if len(parts) != 3:
+        return 0.0
+    try:
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+        return 0.0
+    try:
+        return float(claims.get("exp", 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _login_hostvds(email: str, password: str, timeout_seconds: float) -> str:
+    """用邮箱密码换取 access token。
+
+    HostVDS 用的是 Django REST Framework SimpleJWT，POST /api/token/ 返回
+    access 与 refresh 一对。这里只取 access：它够用 24 小时，而 refresh 自身也会
+    过期、还得额外持久化和轮换——既然有密码可以随时重登，就没必要再存一份同样
+    会失效的东西，少一个会过期的状态就少一类故障。
+    """
+    body = json.dumps({"email": email, "password": password}).encode("utf-8")
     request = Request(
-        HOSTVDS_URL,
+        HOSTVDS_TOKEN_URL,
+        data=body,
         headers={
             "Accept": "application/json",
-            "Cookie": cookie,
+            "Content-Type": "application/json",
+            "Origin": HOSTVDS_ORIGIN,
             "Referer": HOSTVDS_REFERER,
             "User-Agent": HOSTVDS_USER_AGENT,
         },
-        method="GET",
+        method="POST",
     )
     try:
         with urlopen(request, timeout=timeout_seconds) as response:
             payload = json.loads(_read_limited(response).decode("utf-8"))
-    # 401/403 单独区分出来：这说明 Cookie 过期了，需要用户去重新设置，
+    except HTTPError as error:
+        # 400 是字段缺失、401 是密码不对，两者都得人去改配置，重试没有意义，
+        # 所以统一映射成 auth_expired 让手机端显示明确提示而不是笼统的错误。
+        raise ProviderFailure(
+            "auth_expired" if error.code in (400, 401, 403) else "upstream_error"
+        ) from error
+    except (URLError, TimeoutError, OSError) as error:
+        raise ProviderFailure("upstream_error") from error
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ProviderFailure("invalid_response") from error
+    token = payload.get("access") if isinstance(payload, dict) else None
+    if not isinstance(token, str) or not token:
+        raise ProviderFailure("invalid_response")
+    return token
+
+
+class HostVdsAuth:
+    """管理 HostVDS 的访问令牌。
+
+    背景：HostVDS 的 access token 是有效期仅 24 小时的 SimpleJWT。原先的做法是人工
+    从浏览器复制整串 Cookie，等于用手去追一个每天都死的令牌，注定反复失效。这里改成
+    服务自己拿邮箱密码调 /api/token/ 换取，令牌缓存到 /data，重启后不必重新登录。
+
+    仍然保留纯 Cookie 模式：没配凭证文件时按老路走，这样升级不会打断既有部署。
+    """
+
+    def __init__(
+        self, credentials_file: Path, cookie_file: Path, token_cache_file: Path
+    ) -> None:
+        self.credentials_file = credentials_file
+        self.cookie_file = cookie_file
+        self.token_cache_file = token_cache_file
+        # 换令牌要加锁：ThreadingHTTPServer 下多个请求可能同时发现令牌过期，
+        # 不加锁就会并发登录好几次，既浪费也容易触发上游风控。
+        self.lock = threading.Lock()
+        self.token = ""
+        self.expires_at = 0.0
+        self._load_cached_token()
+
+    def uses_credentials(self) -> bool:
+        """凭证文件存在且非空才走自助登录，否则回落到人工 Cookie 模式。"""
+        try:
+            return bool(self.credentials_file.read_text(encoding="utf-8").strip())
+        except OSError:
+            return False
+
+    def access_token(self, timeout_seconds: float, force_login: bool = False) -> str:
+        """返回一个当前有效的 access token，必要时自动登录。
+
+        force_login 供调用方在收到 401 时使用：本地判断没过期不代表服务端认账，
+        比如密码在别处改过、令牌被吊销、或者两边时钟有漂移。这时强制重登一次。
+        """
+        with self.lock:
+            if not force_login and self.token and time.time() < self.expires_at:
+                return self.token
+            email, password = _read_credentials(self.credentials_file)
+            token = _login_hostvds(email, password, timeout_seconds)
+            self.token = token
+            self.expires_at = _jwt_expires_at(token) - TOKEN_REFRESH_SKEW_SECONDS
+            self._store_cached_token()
+            return token
+
+    def _load_cached_token(self) -> None:
+        """启动时从磁盘恢复上次的令牌，避免每次重启都白白登录一次。
+
+        文件不存在、损坏、字段不对，一律当作没有缓存——令牌本来就是可再生的，
+        丢了重登即可，没必要为读缓存失败做任何补救。
+        """
+        try:
+            loaded = json.loads(self.token_cache_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(loaded, dict):
+            return
+        token = loaded.get("access")
+        expires_at = loaded.get("expires_at")
+        if isinstance(token, str) and token and isinstance(expires_at, (int, float)):
+            self.token = token
+            self.expires_at = float(expires_at)
+
+    def _store_cached_token(self) -> None:
+        """原子地把令牌写盘，权限 600。
+
+        写法和 TrafficCollector._save_cache 一致：临时文件 → fsync → replace。
+        额外多一步 chmod：令牌等同于账号访问权限，不能沿用默认的 644。
+        """
+        payload = json.dumps({"access": self.token, "expires_at": self.expires_at})
+        temporary_path = None
+        try:
+            self.token_cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.token_cache_file.parent,
+                prefix="hostvds-token.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary.write(payload)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+                temporary_path = Path(temporary.name)
+            temporary_path.chmod(0o600)
+            temporary_path.replace(self.token_cache_file)
+            temporary_path = None
+        except OSError:
+            # 写盘失败不算致命：内存里的令牌照样能用，最坏结果只是重启后多登一次。
+            LOGGER.warning("Unable to persist the HostVDS token cache.")
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
+
+
+def _hostvds_token_headers(token: str) -> dict[str, str]:
+    """构造带令牌的请求头。
+
+    同时发 Authorization 头和 Autohization Cookie：前者是 SimpleJWT 的标准形式，
+    后者是 HostVDS 前端实际在用的形式——那个拼写是它自己的，不是这里写错了，
+    而且它的值还带一对字面双引号。两种都带上，后端认哪个都能work。
+    """
+    bearer = f"Bearer {token}"
+    return {
+        "Accept": "application/json",
+        "Authorization": bearer,
+        "Cookie": f'Autohization="{bearer}"',
+        "Referer": HOSTVDS_REFERER,
+        "User-Agent": HOSTVDS_USER_AGENT,
+    }
+
+
+def _fetch_hostvds_once(
+    headers: dict[str, str], server_id: str, timeout_seconds: float
+) -> dict[str, Any]:
+    """发一次 HostVDS 请求并解析。认证方式由调用方通过 headers 决定。"""
+    request = Request(HOSTVDS_URL, headers=headers, method="GET")
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            payload = json.loads(_read_limited(response).decode("utf-8"))
+    # 401/403 单独区分出来：这说明凭证失效了，需要重新登录或人工介入，
     # 而不是网络问题。手机端会显示 COOKIE EXPIRED 而不是笼统的 OFFLINE。
     except HTTPError as error:
         raise ProviderFailure("auth_expired" if error.code in (401, 403) else "upstream_error") from error
@@ -283,6 +476,35 @@ def fetch_hostvds(cookie_file: Path, server_id: str, timeout_seconds: float) -> 
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ProviderFailure("invalid_response") from error
     return parse_hostvds(payload, server_id)
+
+
+def fetch_hostvds(
+    auth: HostVdsAuth, server_id: str, timeout_seconds: float
+) -> dict[str, Any]:
+    """向 HostVDS 请求流量数据并解析。
+
+    两种认证模式：配了凭证文件就用自助登录换来的 access token；没配则回落到人工
+    粘贴的 Cookie。请求头都要伪装成浏览器，否则会被挡掉。
+    """
+    if not auth.uses_credentials():
+        headers = {
+            "Accept": "application/json",
+            "Cookie": _read_secret(auth.cookie_file),
+            "Referer": HOSTVDS_REFERER,
+            "User-Agent": HOSTVDS_USER_AGENT,
+        }
+        return _fetch_hostvds_once(headers, server_id, timeout_seconds)
+
+    token = auth.access_token(timeout_seconds)
+    try:
+        return _fetch_hostvds_once(_hostvds_token_headers(token), server_id, timeout_seconds)
+    except ProviderFailure as failure:
+        if failure.code != "auth_expired":
+            raise
+        # 本地判断没过期但服务端不认，强制重登一次再试。只重试这一次：
+        # 密码真的失效时应该尽快把 auth_expired 报上去，而不是陷入登录死循环。
+        token = auth.access_token(timeout_seconds, force_login=True)
+        return _fetch_hostvds_once(_hostvds_token_headers(token), server_id, timeout_seconds)
 
 
 def fetch_sanmao(url_file: Path, timeout_seconds: float) -> dict[str, Any]:
@@ -327,6 +549,17 @@ class TrafficCollector:
 
     def __init__(self) -> None:
         self.cookie_file = Path(os.getenv("HOSTVDS_COOKIE_FILE", "/config/hostvds.cookie"))
+        self.credentials_file = Path(
+            os.getenv("HOSTVDS_CREDENTIALS_FILE", "/config/hostvds.credentials")
+        )
+        # 令牌缓存放 /data 而不是 /config：/config 是只读挂载，而且令牌是可再生的
+        # 派生物，不该和人工维护的凭证混在一起。
+        self.token_cache_file = Path(
+            os.getenv("HOSTVDS_TOKEN_CACHE_FILE", "/data/hostvds-token.json")
+        )
+        self.hostvds_auth = HostVdsAuth(
+            self.credentials_file, self.cookie_file, self.token_cache_file
+        )
         self.sanmao_url_file = Path(os.getenv("SANMAO_URL_FILE", "/config/sanmao.url"))
         self.cache_file = Path(os.getenv("CACHE_FILE", "/data/cache.json"))
         self.server_id = os.getenv("HOSTVDS_SERVER_ID", "").strip()
@@ -404,7 +637,7 @@ class TrafficCollector:
         previous = self.snapshot.get("providers", {})
         jobs = {
             "hostvds": lambda: fetch_hostvds(
-                self.cookie_file, self.server_id, self.timeout_seconds
+                self.hostvds_auth, self.server_id, self.timeout_seconds
             ),
             "sanmao": lambda: fetch_sanmao(self.sanmao_url_file, self.timeout_seconds),
         }
