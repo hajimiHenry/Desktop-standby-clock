@@ -107,7 +107,11 @@ final class YeelightAddressResolver {
                 continue;
             }
             String[] fields = lower.split("\\s+");
-            if (fields.length < 5 || !IPV4_PATTERN.matcher(fields[0]).matches()) {
+            // 读取命令带了 dev wlan0，ip 就不再重复打印设备名，所以最短的有效行
+            // 只有 4 段："IP lladdr MAC 状态"。这里原先要求至少 5 段，等于把每一
+            // 行都跳过，按 MAC 恢复地址的整条路径因此静默失效，一直回退到配置里
+            // 那个早就过期的 IP。
+            if (fields.length < 4 || !IPV4_PATTERN.matcher(fields[0]).matches()) {
                 continue;
             }
             for (int index = 1; index + 1 < fields.length; index++) {
