@@ -1819,16 +1819,11 @@ public final class ClockView extends View {
             boolean fiveMinute = minute % 5 == 0;
             boolean cardinal = minute % 15 == 0;
 
-            // 内端点的位置比例。数值越小刻度越长（越往圆心伸），
-            // 所以整点刻度的 0.50 是最长的。
-            float innerScale;
-            if (cardinal) {
-                innerScale = 0.50f;
-            } else if (fiveMinute) {
-                innerScale = 0.65f;
-            } else {
-                innerScale = 0.82f;
-            }
+            // 内端点的位置比例。数值越小刻度越长（越往圆心伸）。
+            // 12 根主刻度统一使用同一个比例，让它们的内端点整齐地落在
+            // 同一条超椭圆内圈上；整点刻度仍通过更粗的线宽和更强的辉光
+            // 保留主次层次，但不再单独向圆心伸出，避免这组亮刻度参差不齐。
+            float innerScale = fiveMinute ? 0.65f : 0.82f;
 
             float innerX = centerX + (outerX - centerX) * innerScale;
             float innerY = centerY + (outerY - centerY) * innerScale;
