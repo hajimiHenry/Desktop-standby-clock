@@ -1,13 +1,17 @@
 # Maintenance Guide
 
 This document describes the current native Android implementation. It is intended
-to prevent future UI, ambient-light automation, and MIUI persistence changes from drifting
+to prevent future UI, ambient-light automation, and persistence changes from drifting
 away from the behavior already validated on the dedicated phone.
 
 ## Supported target
 
-- Tested device: rooted Xiaomi Mi 9 Pro 5G
-- Tested operating system: Android 10 / MIUI 12
+- Tested device: rooted Xiaomi Mi 9 Pro 5G (`crux`, `msmnile`)
+- Tested operating system: Android 13, TrebleDroid vanilla GSI on a LineageOS base
+  (`userdebug`, test-keys), Magisk 30.7
+- Earlier releases through v0.1.2 were validated on the phone's original Android 10 /
+  MIUI 12 firmware; vendor-specific workarounds from that era are called out where
+  they no longer apply
 - Orientation: permanently landscape
 - Android package: `com.henry.standbyclock`
 - Minimum SDK: 29 (Android 10)
@@ -35,7 +39,7 @@ validated by this project.
 | `BedtimeSchedule` | Contains the deterministic daily-trigger and 15-minute adjustment calculations covered by local unit tests. |
 | `PersistenceReceiver` | Handles `BOOT_COMPLETED` and `MY_PACKAGE_REPLACED`, starts the foreground service, and restores the clock task. |
 | `RootShell` | Brings the clock task forward and reads the rooted phone's LAN neighbor table. |
-| `scripts/standby-clock-service.sh` | Magisk `service.d` boot helper for MIUI AppOps, Doze exclusion, service start, and task restore. |
+| `scripts/standby-clock-service.sh` | Magisk `service.d` boot helper for background AppOps, Doze exclusion, grant-notification suppression, service start, and task restore. |
 
 The app declares network access for its trusted-LAN device controls but declares no
 camera or storage permission. It captures no images and bundles no machine-learning
@@ -108,11 +112,23 @@ configured Android build. Missing values intentionally produce `NOT CONFIGURED`
 instead of a network request. The optional `STANDBY_CLOCK_CONFIG` environment
 variable can select a different properties file for CI or alternate installations.
 
-Yeelight control stores both `yeelight.host` and `yeelight.mac`. The host remains a
-backward-compatible fallback, while the rooted dedicated phone resolves the stable MAC
-from `ip neigh`, caches the current address, and refreshes its `/24` Wi-Fi neighbors only
-after an address failure. A read-only protocol query verifies a recovered address before
-the app sends `toggle`, which is never automatically retried because it has side effects.
+Yeelight control stores both `yeelight.host` and `yeelight.mac`, and the resolver
+degrades through four levels ordered by cost: the in-process cache, the last address
+that worked (persisted in `SharedPreferences` under `yeelight_host`), the configured
+static `yeelight.host`, and only then `ip neigh` over root. The first three are plain
+TCP connections; only the fourth needs `su`.
+
+That order matters. Root is reached only when the caller passes `forceRefresh` after
+failing to reach a known address, or when no address is known at all — a lamp changes
+its DHCP address every few months, so paying for a `su` fork, a shell round-trip and a
+Magisk grant toast on every cold start buys nothing. The resolver originally had this
+backwards: an empty in-process cache went straight to root, and the static host was
+merely the fallback for a completely failed root path, so every process restart cost
+the user a toast the first time they opened the device panel.
+
+A `/24` neighbor refresh by ping runs only when the table has no entry for the MAC.
+A read-only protocol query verifies a recovered address before the app sends `toggle`,
+which is never automatically retried because it has side effects.
 
 On the VPS, copy `.env.example` to `.env` and the two `config/*.example` files to
 their names without `.example`. Update the HostVDS session without placing it in
@@ -203,7 +219,7 @@ used only to make the device behave like a dedicated appliance:
 
 - Restore the task after it is removed.
 - Restore the service and activity during boot.
-- Reapply MIUI auto-start/background AppOps and Doze whitelist state.
+- Reapply background AppOps and Doze whitelist state.
 - Optionally suppress only this app UID's Magisk grant notification.
 
 The Magisk helper runs directly as root and therefore does not invoke `su` during
@@ -231,8 +247,9 @@ Normal install:
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-MIUI root fallback when normal ADB installation returns
-`INSTALL_FAILED_USER_RESTRICTED`:
+Root fallback when normal ADB installation returns
+`INSTALL_FAILED_USER_RESTRICTED` (this was routine on MIUI; the current GSI has not
+needed it):
 
 ```bash
 adb push app/build/outputs/apk/debug/app-debug.apk /data/local/tmp/standby-clock.apk
@@ -261,6 +278,8 @@ Expected steady state:
 - The blackout screenshot contains only black pixels.
 - A tap during blackout restores the clock at low brightness, logs `touch_wake=ON`, and logs `touch_wake=OFF` about twenty seconds after the last touch.
 - A right swipe that starts during blackout opens the device controls in one gesture.
+- Opening the device panel on a freshly started process resolves the lamp without any
+  Magisk grant toast, because the stored address is used before root is considered.
 
 Blackout-dependent behavior can be exercised without waiting for a dark room by
 replaying the display-mode broadcast and injecting input:
@@ -298,15 +317,53 @@ steady room.
 
 - Confirm `/data/adb/service.d/standby-clock.sh` exists and is executable (`0755`).
 - Check `StandbyBoot` logcat output.
-- Confirm MIUI AppOp `10008` and background AppOps are allowed.
+- Confirm background AppOps are allowed. The MIUI-private auto-start AppOp `10008`
+  was removed from the helper: on this GSI it does not exist and `cmd appops set`
+  answers `Bad operation #10008`.
 - Confirm the package is still on the Doze whitelist.
 - Confirm Magisk is running `service.d` scripts.
 
 ### A superuser toast appears
 
-- If it names the clock app, verify the Magisk policy for the current package UID.
-- If it names `Shell`, stop using `adb shell su` commands while observing normal behavior; the toast belongs to the diagnostic shell session.
-- Do not disable Magisk notifications globally.
+- If it names `Shell`, it belongs to the diagnostic shell session, not to the clock.
+  Stop using `adb shell su` commands while observing normal behavior.
+- If it names the clock app, the boot helper's suppression step has not run for the
+  current package UID. Check `notification` for that UID:
+
+  ```bash
+  adb shell su -c 'sh /data/adb/service.d/standby-clock.sh'
+  ```
+
+  The helper is idempotent and re-applies `notification=0` along with the AppOps and
+  Doze state. Confirm with a device-local script (see the note on quoting below):
+
+  ```sh
+  sqlite3 /data/adb/magisk.db "SELECT uid, policy, notification FROM policies;"
+  ```
+
+- Suppression writes `notification=0` for this UID only, and never touches `policy`,
+  which is the grant itself. Do not disable Magisk notifications globally.
+- `magisk --sqlite` no longer exists in Magisk 30 — its applets are down to `su` and
+  `resetprop`, and policy management moved into the app. The helper therefore writes
+  to `/data/adb/magisk.db` through `sqlite3` directly. A version of the helper written
+  before that removal silently did nothing.
+- Reinstalling the app can change its UID, which leaves the stored suppression pointing
+  at the old one. Re-running the helper is the fix.
+
+### `su -c` behaves inconsistently over ADB
+
+Compound commands passed as `adb shell su -c '...'` on this device fail in confusing
+ways: quoted SQL is truncated (`Error: incomplete input`), `chmod` returns
+`Permission denied` as root, and a directory listing that worked a moment earlier
+stops working. Write the commands into a script file, push it, and run that instead:
+
+```bash
+adb push probe.sh /data/local/tmp/probe.sh
+adb shell su -c 'sh /data/local/tmp/probe.sh'
+```
+
+Every root step in this document that involves quoting or file permissions was verified
+through a device-local script for this reason.
 
 ## Change checklist
 
@@ -319,6 +376,7 @@ Before handing off a future release:
 5. Verify up/down style swipes, click/long-press isolation, the one-hour countdown reset, and the `AUTO SWITCH` toggle.
 6. Verify twenty-second dark blackout, three-second bright restore, and indefinite visibility while bright.
 7. Verify tap-to-wake during blackout: low-brightness restore, the twenty-second timeout, and a single right swipe reaching the device controls.
-8. Verify bedtime activation, persistent visibility, both sound plays, `DONE`, `+15 MIN`, and the long-press settings controls.
-9. Reboot once after persistence changes and inspect `StandbyBoot` logs.
-10. Update this file and the README if constants, installation steps, UI text, or scope change.
+8. Confirm `/data/adb/service.d/standby-clock.sh` is deployed and executable, and that opening the device panel after a cold start produces no grant toast.
+9. Verify bedtime activation, persistent visibility, both sound plays, `DONE`, `+15 MIN`, and the long-press settings controls.
+10. Reboot once after persistence changes and inspect `StandbyBoot` logs.
+11. Update this file and the README if constants, installation steps, UI text, or scope change.

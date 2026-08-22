@@ -19,7 +19,7 @@
 - 带简短 CRT 风格提示音的就寝提醒
 - 在本地局域网控制 Yeelight 吸顶灯，并通过 Wake-on-LAN 唤醒电脑
 - 从私人 VPS 状态桥读取 HostVDS 与三毛机场的剩余流量
-- 在已 root 的 MIUI 手机上支持开机恢复和任务移除恢复
+- 在已 root 的手机上支持开机恢复和任务移除恢复
 
 ## 操作
 
@@ -52,5 +52,5 @@ Debug APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。
 
 ## 技术文档
 
-架构、环境光阈值、MIUI 常驻、安装、验证、流量桥配置和故障排查统一记录在
+架构、环境光阈值、常驻方案、安装、验证、流量桥配置和故障排查统一记录在
 [docs/MAINTENANCE.md](docs/MAINTENANCE.md)。

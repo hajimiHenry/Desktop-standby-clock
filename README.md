@@ -20,7 +20,7 @@ dedicated desktop display.
 - Persistent bedtime reminder with a short CRT-style chime
 - Local controls for a Yeelight ceiling light and Wake-on-LAN desktop startup
 - HostVDS and Sanmao remaining-traffic status from a private VPS bridge
-- Dedicated-display recovery after boot or task removal on a rooted MIUI phone
+- Dedicated-display recovery after boot or task removal on a rooted phone
 
 ## Controls
 
@@ -54,6 +54,6 @@ Release signing and publication are documented in
 
 ## Documentation
 
-Architecture, ambient-light thresholds, MIUI persistence, installation, verification,
+Architecture, ambient-light thresholds, persistence, installation, verification,
 traffic-bridge setup, and troubleshooting are documented in
 [docs/MAINTENANCE.md](docs/MAINTENANCE.md).
