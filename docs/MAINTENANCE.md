@@ -31,6 +31,7 @@ validated by this project.
 | `ClockStyleSwitching` | Contains the pure vertical-gesture and one-hour deadline rules covered by local unit tests. |
 | `StandbyService` | Monitors the ambient-light sensor, owns visible/blackout state, runs the bedtime schedule, and restores the clock task after removal. |
 | `AmbientLightPolicy` | Contains the pure hysteresis and temporal-confirmation rules covered by local unit tests. |
+| `TouchWakePolicy` | Contains the pure tap-to-wake window arithmetic covered by local unit tests. |
 | `BedtimeSchedule` | Contains the deterministic daily-trigger and 15-minute adjustment calculations covered by local unit tests. |
 | `PersistenceReceiver` | Handles `BOOT_COMPLETED` and `MY_PACKAGE_REPLACED`, starts the foreground service, and restores the clock task. |
 | `RootShell` | Brings the clock task forward and reads the rooted phone's LAN neighbor table. |
@@ -176,6 +177,21 @@ display visible at low brightness until `DONE` or `+15 MIN` is selected. Opening
 settings panel also temporarily holds the display visible; closing or leaving the
 activity releases that hold.
 
+Tap-to-wake is the second exception. Without it a blacked-out screen ignores every
+touch, so a dark room can only be escaped through the physical light switch. Any touch
+opens a twenty-second window (`TouchWakePolicy.WAKE_DURATION_MS`) during which the
+display is held visible at `MainActivity.TOUCH_WAKE_BRIGHTNESS` (`0.15`), and every
+further touch refills it. The rule is simply that blackout never happens within twenty
+seconds of the last touch.
+
+`MainActivity` owns this window rather than `StandbyService`, because it is a transient
+UI state that can only exist while the activity is in the foreground, and because a
+broadcast round-trip would make the response lag the finger. The window is applied in
+`Activity.dispatchTouchEvent` before the event reaches `ClockView`, so one uninterrupted
+right swipe out of blackout still opens the device controls. `StandbyService` keeps
+reporting blackout throughout; the window only suppresses it locally, and it is dropped
+as soon as confirmed brightness restores the display or the activity stops.
+
 This avoids a portrait lock-screen/AOD transition before the landscape clock appears.
 It also means the device is still logically awake and will continue consuming power.
 Battery bypass charging and battery-health policy are not implemented.
@@ -243,6 +259,27 @@ Expected steady state:
 - The display remains visible indefinitely while the environment stays bright.
 - The package requests no camera permission and Android shows no camera privacy indicator.
 - The blackout screenshot contains only black pixels.
+- A tap during blackout restores the clock at low brightness, logs `touch_wake=ON`, and logs `touch_wake=OFF` about twenty seconds after the last touch.
+- A right swipe that starts during blackout opens the device controls in one gesture.
+
+Blackout-dependent behavior can be exercised without waiting for a dark room by
+replaying the display-mode broadcast and injecting input:
+
+```bash
+adb shell su -c 'am broadcast -a com.henry.standbyclock.action.DISPLAY_MODE -p com.henry.standbyclock --ez blackout true'
+adb shell input tap 1170 540
+adb exec-out screencap -p > /tmp/clock.png
+adb shell su -c 'am broadcast -a com.henry.standbyclock.action.DISPLAY_MODE -p com.henry.standbyclock --ez blackout false'
+```
+
+Root is required for the broadcast. `MainActivity` registers its receiver as
+`RECEIVER_NOT_EXPORTED`, so the same command from the plain `adb shell` user is
+accepted by `am` and then silently dropped, which looks like a working command that
+changes nothing. Only `MainActivity` is affected: `StandbyService` keeps its real
+ambient state, so the final broadcast above restores the display, and any genuine
+sensor transition would have corrected it anyway. A screenshot is the reliable check,
+because the light sensor only reports on change and can stay silent for minutes in a
+steady room.
 - At the configured bedtime, the reminder overrides darkness and survives an activity/service restart.
 - `DONE` returns control to ambient-light blackout; `+15 MIN` hides the reminder and persists its delayed state.
 - With sound enabled, logcat reports `bedtime_sound=PLAY count=1`, and reports `count=2` only if the reminder remains active for five minutes.
@@ -281,6 +318,7 @@ Before handing off a future release:
 4. Visually inspect both clock faces at several times so transitions and long cardinal marks are covered.
 5. Verify up/down style swipes, click/long-press isolation, the one-hour countdown reset, and the `AUTO SWITCH` toggle.
 6. Verify twenty-second dark blackout, three-second bright restore, and indefinite visibility while bright.
-7. Verify bedtime activation, persistent visibility, both sound plays, `DONE`, `+15 MIN`, and the long-press settings controls.
-8. Reboot once after persistence changes and inspect `StandbyBoot` logs.
-9. Update this file and the README if constants, installation steps, UI text, or scope change.
+7. Verify tap-to-wake during blackout: low-brightness restore, the twenty-second timeout, and a single right swipe reaching the device controls.
+8. Verify bedtime activation, persistent visibility, both sound plays, `DONE`, `+15 MIN`, and the long-press settings controls.
+9. Reboot once after persistence changes and inspect `StandbyBoot` logs.
+10. Update this file and the README if constants, installation steps, UI text, or scope change.

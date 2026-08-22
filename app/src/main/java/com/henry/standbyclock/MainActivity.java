@@ -10,7 +10,9 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
@@ -51,6 +53,12 @@ public final class MainActivity extends Activity {
      * （见 ClockView.animateClockStyle），过 500ms 再试一次即可。
      */
     private static final long STYLE_SWITCH_RETRY_MS = 500L;
+    /**
+     * 轻触点亮时用的固定亮度。比睡眠提醒的 0.10 稍亮一点——够看清表盘、也够操作面板，
+     * 但在漆黑的房间里仍然不刺眼。不交给系统自动亮度是因为刚从 0 亮度覆盖恢复时，
+     * 自动亮度往往要缓慢爬升，摸黑点一下屏幕却要等它亮起来，手感很差。
+     */
+    private static final float TOUCH_WAKE_BRIGHTNESS = 0.15f;
 
     private final YeelightAddressResolver yeelightAddressResolver =
             new YeelightAddressResolver(
@@ -73,6 +81,19 @@ public final class MainActivity extends Activity {
     /** 以下两个是 Service 广播过来的状态副本，用于决定屏幕亮度。 */
     private boolean displayBlackout;
     private boolean bedtimeReminderActive;
+
+    /**
+     * 轻触点亮：熄屏时碰一下屏幕，临时把显示放出来一小会儿。
+     *
+     * <p>这个状态<em>不</em>交给 Service 管，故意留在界面里。它纯粹是一次触摸引发的
+     * 瞬时 UI 状态：只有界面在前台时才可能产生，界面没了它也就没有意义；而且要跟手，
+     * 走一圈 Intent 加广播反而慢。Service 那边的 displayBlackout 保持不变，
+     * 这里只是在最终合成亮度时把它压住。
+     */
+    private final TouchWakePolicy touchWakePolicy = new TouchWakePolicy();
+    /** 点亮窗口的到期定时器，跑在主线程。 */
+    private final Handler touchWakeHandler = new Handler(Looper.getMainLooper());
+    private final Runnable touchWakeExpiry = this::expireTouchWake;
 
     private boolean autoStyleSwitchEnabled;
 
@@ -221,31 +242,98 @@ public final class MainActivity extends Activity {
     }
 
     private void applyBlackout(boolean blackout) {
+        // 环境光自己把屏幕点亮了（多半是用户真去开了灯），临时窗口就没有存在意义了，
+        // 撤掉它，免得到期回调白跑一次、或者在环境重新变暗时莫名其妙地续上一段。
+        if (!blackout) {
+            cancelTouchWake();
+        }
         displayBlackout = blackout;
         applyDisplayState();
     }
 
     /**
-     * 根据熄屏 / 睡眠提醒两个状态，决定屏幕该多亮。三档：
-     * 熄屏时亮度压到 0 并画纯黑（OLED 像素完全不发光）；
+     * 所有触摸的总入口。在事件分发给 ClockView <em>之前</em>先把屏幕点亮，
+     * 这样同一个手势里后续的滑动、长按判断看到的已经是"没熄屏"的状态——摸黑回到家
+     * 直接一次右滑就能划进设备控制去开灯，不用先点一下唤醒、再重新划一次。
+     */
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        int action = event.getActionMasked();
+        // 按下时点亮，抬手时再续满一次：这样长按几秒打开设置之后，
+        // 剩下的窗口仍然是完整的 20 秒，不会刚点开就黑掉。
+        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_UP) {
+            noteTouchWake();
+        }
+        return super.dispatchTouchEvent(event);
+    }
+
+    /**
+     * 记一次触摸并重排到期回调。
+     *
+     * <p>屏幕本来就亮着时这里基本是空转：applyDisplayState 会发现亮度没变而不去动窗口，
+     * 到期回调跑起来同样什么都不改。所以不必先判断"是不是熄屏中"再决定要不要记——
+     * 无条件记录反而让规则更简单：<b>最后一次触摸之后的 20 秒内不进入熄屏</b>。
+     */
+    private void noteTouchWake() {
+        long nowMs = SystemClock.elapsedRealtime();
+        // 只在熄屏状态下打日志，否则每次触摸都会刷屏。
+        if (displayBlackout && !touchWakePolicy.isAwake(nowMs)) {
+            Log.i(TAG, "touch_wake=ON");
+        }
+        touchWakePolicy.noteTouch(nowMs);
+        touchWakeHandler.removeCallbacks(touchWakeExpiry);
+        touchWakeHandler.postDelayed(touchWakeExpiry, TouchWakePolicy.WAKE_DURATION_MS);
+        applyDisplayState();
+    }
+
+    /** 点亮窗口到期：把显示交还给环境光状态机，该黑就黑。 */
+    private void expireTouchWake() {
+        if (displayBlackout) {
+            Log.i(TAG, "touch_wake=OFF");
+        }
+        touchWakePolicy.clear();
+        applyDisplayState();
+    }
+
+    /** 立刻结束点亮窗口并撤掉定时器。 */
+    private void cancelTouchWake() {
+        touchWakeHandler.removeCallbacks(touchWakeExpiry);
+        touchWakePolicy.clear();
+    }
+
+    /**
+     * 根据熄屏 / 睡眠提醒 / 轻触点亮三个状态，决定屏幕该多亮。四档：
+     * 真正熄屏时亮度压到 0 并画纯黑（OLED 像素完全不发光）；
      * 睡眠提醒时用 10% 的极暗亮度（夜里看得见但不刺眼）；
+     * 环境仍然是暗的、只是被轻触临时点亮时用 {@link #TOUCH_WAKE_BRIGHTNESS}；
      * 其余情况交还给系统自动亮度。
      *
-     * <p>注意熄屏与提醒同时成立时提醒优先——提醒本来就是要在漆黑的房间里叫醒你的。
+     * <p>三者都成立时的优先级是"提醒 &gt; 轻触 &gt; 熄屏"——提醒本来就是要在漆黑的
+     * 房间里叫醒你的，而用户刚碰过屏幕就更不该黑着。
      */
     private void applyDisplayState() {
-        boolean effectiveBlackout = displayBlackout && !bedtimeReminderActive;
+        boolean touchAwake = touchWakePolicy.isAwake(SystemClock.elapsedRealtime());
+        boolean effectiveBlackout =
+                displayBlackout && !bedtimeReminderActive && !touchAwake;
         clockView.setBlackout(effectiveBlackout);
         Window window = getWindow();
         WindowManager.LayoutParams attributes = window.getAttributes();
+        float brightness;
         if (effectiveBlackout) {
-            attributes.screenBrightness = 0f;
+            brightness = 0f;
         } else if (bedtimeReminderActive) {
-            attributes.screenBrightness = 0.10f;
+            brightness = 0.10f;
+        } else if (displayBlackout) {
+            brightness = TOUCH_WAKE_BRIGHTNESS;
         } else {
-            attributes.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+            brightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
         }
-        window.setAttributes(attributes);
+        // 亮度没变就不要调 setAttributes：这个方法现在被每一次触摸驱动，
+        // 而 setAttributes 是一次跨进程的窗口更新，白发没有意义。
+        if (attributes.screenBrightness != brightness) {
+            attributes.screenBrightness = brightness;
+            window.setAttributes(attributes);
+        }
     }
 
     /**
@@ -256,9 +344,13 @@ public final class MainActivity extends Activity {
         ClockView.UiAction action = clockView.resolveTapAction();
         switch (action) {
             case BEDTIME_DONE:
+                // DONE 和 +15 MIN 的语义都是"别亮着了"，得把这次点击顺带开出来的
+                // 点亮窗口撤掉，否则提醒收起后屏幕还要多亮 20 秒才黑，正好拧着来。
+                cancelTouchWake();
                 sendServiceAction(StandbyService.ACTION_BEDTIME_DONE);
                 break;
             case BEDTIME_SNOOZE:
+                cancelTouchWake();
                 sendServiceAction(StandbyService.ACTION_BEDTIME_SNOOZE);
                 break;
             case BEDTIME_MINUS_15:
@@ -564,6 +656,8 @@ public final class MainActivity extends Activity {
     @Override
     protected void onStop() {
         autoStyleHandler.removeCallbacks(autoStyleSwitch);
+        // 界面都退到后台了，点亮窗口没有意义；留着它下次回到前台还会压住熄屏。
+        cancelTouchWake();
         boolean overlayWasVisible = clockView.isSettingsVisible()
                 || clockView.isDeviceMenuVisible();
         if (clockView.isSettingsVisible()) {

@@ -15,6 +15,7 @@ dedicated desktop display.
 - Two clock faces: a warm P3 amber phosphor dial and a restrained calligraphic display
 - Automatic hourly face rotation, plus manual swipe switching
 - Ambient-light blackout: dark room means pure black OLED pixels; light restores the clock and keeps it visible
+- Tap-to-wake: a touch lights the blacked-out screen at low brightness for twenty seconds, so a dark room no longer means reaching for the wall switch
 - Five-minute pixel shifting for OLED burn-in protection
 - Persistent bedtime reminder with a short CRT-style chime
 - Local controls for a Yeelight ceiling light and Wake-on-LAN desktop startup
@@ -27,6 +28,7 @@ dedicated desktop display.
 - Swipe right: open device controls
 - Swipe left: open the HostVDS and Sanmao traffic dashboard
 - Long press: open clock settings
+- Tap while blacked out: light the screen for twenty seconds; any further touch refills the window, and the usual swipes work throughout
 
 ## Build
 
