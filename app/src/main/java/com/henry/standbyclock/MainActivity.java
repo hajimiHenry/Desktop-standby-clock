@@ -49,6 +49,11 @@ public final class MainActivity extends Activity {
     /** 下次自动切表盘的绝对时间戳，存起来是为了熄屏／重启后倒计时能接着走。 */
     private static final String KEY_NEXT_AUTO_STYLE_SWITCH_AT = "next_auto_style_switch_at";
     /**
+     * 上次成功连上的吸顶灯地址。存下来是为了让冷启动能直接拿它去连，
+     * 而不必掏 root 读邻居表——那条路每走一次都会弹一条 Magisk 授权提示。
+     */
+    private static final String KEY_YEELIGHT_HOST = "yeelight_host";
+    /**
      * 自动切换被拒绝时的重试间隔。切换会被拒绝是因为上一次切换动画还没播完
      * （见 ClockView.animateClockStyle），过 500ms 再试一次即可。
      */
@@ -60,9 +65,8 @@ public final class MainActivity extends Activity {
      */
     private static final float TOUCH_WAKE_BRIGHTNESS = 0.15f;
 
-    private final YeelightAddressResolver yeelightAddressResolver =
-            new YeelightAddressResolver(
-                    DeviceControlConfig.YEELIGHT_HOST, DeviceControlConfig.YEELIGHT_MAC);
+    /** 在 onCreate 里构造：它需要 SharedPreferences 才能记住上次可用的灯地址。 */
+    private YeelightAddressResolver yeelightAddressResolver;
     private final TrafficStatusClient trafficStatusClient = new TrafficStatusClient(
             DeviceControlConfig.TRAFFIC_STATUS_URL);
     /**
@@ -168,6 +172,23 @@ public final class MainActivity extends Activity {
         clockPreferences = getSharedPreferences(CLOCK_PREFERENCES, MODE_PRIVATE);
         autoStyleSwitchEnabled = clockPreferences.getBoolean(
                 KEY_AUTO_STYLE_SWITCH_ENABLED, true);
+        // 地址解析器把"上次可用的地址"存进同一份偏好里，这样进程被系统回收重启后，
+        // 第一次开设备面板可以直接连灯，不用先走一遍 root。
+        yeelightAddressResolver = new YeelightAddressResolver(
+                DeviceControlConfig.YEELIGHT_HOST,
+                DeviceControlConfig.YEELIGHT_MAC,
+                new YeelightAddressResolver.AddressStore() {
+                    @Override
+                    public String read() {
+                        return clockPreferences.getString(KEY_YEELIGHT_HOST, null);
+                    }
+
+                    @Override
+                    public void write(String host) {
+                        clockPreferences.edit().putString(KEY_YEELIGHT_HOST, host).apply();
+                    }
+                },
+                YeelightAddressResolver.DEFAULT_ROOT_RUNNER);
 
         // 整个界面只有这一个 View，没有 XML 布局，所有内容都是它在 onDraw 里画出来的。
         clockView = new ClockView(this);

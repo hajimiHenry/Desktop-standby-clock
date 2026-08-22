@@ -5,11 +5,27 @@ import java.util.Locale;
 import java.util.regex.Pattern;
 
 /**
- * 用灯的固定 MAC 解析当前局域网 IP，并在内存中缓存最近一次成功结果。
+ * 解析吸顶灯当前的局域网 IP，必要时用它的固定 MAC 把变动的地址找回来。
  *
- * <p>Android 应用不能拿 MAC 直接建立 TCP 连接，所以这里借助专用手机已有的 root
- * 权限读取 Linux 邻居表。邻居表没有目标时才分批 ping 当前 Wi-Fi 的 /24 网段来刷新；
- * 这是故障恢复路径，不会在每次开关灯时执行。
+ * <p>解析按代价从低到高排成四级，逐级降级：
+ *
+ * <ol>
+ *   <li><b>内存缓存</b>：同一个进程里已经解析过，直接用。</li>
+ *   <li><b>上次可用的地址</b>：由 {@link AddressStore} 持久化，跨进程重启有效。</li>
+ *   <li><b>配置里的静态 IP</b>：{@code standby-clock.properties} 写死的那个。</li>
+ *   <li><b>root 读邻居表</b>：只有上面全都连不上（调用方传 {@code forceRefresh}），
+ *       或者压根没有任何已知地址时才走到这里。</li>
+ * </ol>
+ *
+ * <p>前三级都是纯 TCP 直连，第四级才需要 root。这个顺序很重要：灯的 IP 几个月才被
+ * DHCP 换一次，而 root 那条路每执行一次就要 fork 一个 su 进程、跑一遍 shell，还会弹
+ * 一条 Magisk 授权提示——为一件几个月才发生一次的事在每次冷启动都付这个代价并不划算。
+ *
+ * <p>（这里原先的实现是反着的：只要内存缓存为空就先掏 root 读邻居表，静态 IP 沦为
+ * root 整条路径都失败后的备胎。于是应用每被系统回收重启一次，用户开一次设备面板就会
+ * 看到一条授权提示。）
+ *
+ * <p>邻居表里没有目标时，才分批 ping 当前 Wi-Fi 的 /24 网段来刷新它。
  */
 final class YeelightAddressResolver {
     private static final Pattern MAC_PATTERN = Pattern.compile(
@@ -33,36 +49,88 @@ final class YeelightAddressResolver {
             + "done; wait; start=$((end + 1)); done; "
             + READ_NEIGHBORS_COMMAND;
 
+    /**
+     * 上次成功解析出的地址的持久化出口。
+     *
+     * <p>抽成接口而不是直接用 SharedPreferences，是为了让这个类保持"纯逻辑、可单测"，
+     * 和 AmbientLightPolicy 一样不碰 Android API。界面层提供真实实现，测试里换成内存版。
+     */
+    interface AddressStore {
+        /** 读上次记住的地址；没有则返回 null。 */
+        String read();
+
+        /** 记住一个新解析出来的地址。 */
+        void write(String host);
+    }
+
+    /** 执行一条 root 命令并返回标准输出。同样是为了可测才抽成接口。 */
+    interface RootCommandRunner {
+        String run(String command) throws IOException;
+    }
+
+    /** 默认实现：走 RootShell，命令非 0 退出时返回空串（当作"没查到"处理）。 */
+    static final RootCommandRunner DEFAULT_ROOT_RUNNER = command -> {
+        try {
+            RootShell.Result result = RootShell.capture(command);
+            return result.exitCode == 0 ? result.output : "";
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while resolving Yeelight address", exception);
+        }
+    };
+
     private final String fallbackHost;
     private final String macAddress;
+    private final AddressStore store;
+    private final RootCommandRunner rootRunner;
     private String cachedHost;
 
-    YeelightAddressResolver(String fallbackHost, String macAddress) {
+    YeelightAddressResolver(
+            String fallbackHost,
+            String macAddress,
+            AddressStore store,
+            RootCommandRunner rootRunner) {
         this.fallbackHost = fallbackHost == null ? "" : fallbackHost.trim();
         this.macAddress = normalizeMac(macAddress);
+        this.store = store;
+        this.rootRunner = rootRunner == null ? DEFAULT_ROOT_RUNNER : rootRunner;
     }
 
     /**
-     * @param forceRefresh true 时主动刷新邻居表，用于已缓存地址连接失败后的自愈
+     * @param forceRefresh true 表示调用方刚刚连不上上一次给出的地址，要求撇开所有已知
+     *                     地址、用 root 重新发现。这是唯一会主动动用 root 的入口
      */
     synchronized String resolve(boolean forceRefresh) throws IOException {
-        if (!forceRefresh && cachedHost != null) {
-            return cachedHost;
+        // 非强制模式下逐级试探那三种不需要 root 的地址来源。
+        if (!forceRefresh) {
+            if (cachedHost != null) {
+                return cachedHost;
+            }
+            String storedHost = store == null ? null : store.read();
+            if (isIpv4(storedHost)) {
+                cachedHost = storedHost.trim();
+                return cachedHost;
+            }
+            if (!fallbackHost.isEmpty()) {
+                cachedHost = fallbackHost;
+                return fallbackHost;
+            }
         }
 
+        // 走到这里说明要么已知地址都连不上，要么一个已知地址都没有——该 root 出场了。
         if (macAddress != null) {
             try {
-                String host = findNeighborIp(runRoot(READ_NEIGHBORS_COMMAND), macAddress);
+                String host = findNeighborIp(rootRunner.run(READ_NEIGHBORS_COMMAND), macAddress);
                 if (host == null || forceRefresh) {
                     String refreshedHost = findNeighborIp(
-                            runRoot(REFRESH_NEIGHBORS_COMMAND), macAddress);
+                            rootRunner.run(REFRESH_NEIGHBORS_COMMAND), macAddress);
                     // 刷新命令失败时保留刷新前仍然有效的邻居记录，不退回错误的旧配置。
                     if (refreshedHost != null) {
                         host = refreshedHost;
                     }
                 }
                 if (host != null) {
-                    cachedHost = host;
+                    remember(host);
                     return host;
                 }
             } catch (IOException rootFailure) {
@@ -80,18 +148,26 @@ final class YeelightAddressResolver {
         throw new IOException("Yeelight address could not be resolved");
     }
 
+    /**
+     * 丢掉内存缓存，让下一次 resolve 重新决定用哪个地址。
+     *
+     * <p>故意不清持久化的那一份：它下一次仍然值得先试一把（灯多半只是临时离线），
+     * 真的换了地址时会被 root 发现的新地址覆盖掉。
+     */
     synchronized void invalidate() {
         cachedHost = null;
     }
 
-    private static String runRoot(String command) throws IOException {
-        try {
-            RootShell.Result result = RootShell.capture(command);
-            return result.exitCode == 0 ? result.output : "";
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            throw new IOException("Interrupted while resolving Yeelight address", exception);
+    /** 记住一个刚解析成功的地址：内存和持久化各存一份。 */
+    private void remember(String host) {
+        cachedHost = host;
+        if (store != null) {
+            store.write(host);
         }
+    }
+
+    private static boolean isIpv4(String value) {
+        return value != null && IPV4_PATTERN.matcher(value.trim()).matches();
     }
 
     /** 从 ip neigh 的输出中找 MAC；忽略 FAILED/INCOMPLETE 等不可用记录。 */
