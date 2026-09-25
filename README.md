@@ -18,7 +18,9 @@ dedicated desktop display.
 - Tap-to-wake: a touch lights the blacked-out screen at low brightness for twenty seconds, so a dark room no longer means reaching for the wall switch
 - Five-minute pixel shifting for OLED burn-in protection
 - Persistent bedtime reminder with a short CRT-style chime
-- Local controls for a Yeelight ceiling light and Wake-on-LAN desktop startup
+- Sedentary reminder that prompts a stand-up break at a set interval during the day
+- Local controls for a Yeelight ceiling light (power plus study and rest presets) and
+  Wake-on-LAN desktop startup
 - HostVDS and Sanmao remaining-traffic status from a private VPS bridge
 - Dedicated-display recovery after boot or task removal on a rooted phone
 
