@@ -1,6 +1,8 @@
 package com.henry.standbyclock;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
 
@@ -40,5 +42,25 @@ public final class YeelightClientTest {
     @Test(expected = IOException.class)
     public void malformedPowerResponseIsRejected() throws IOException {
         YeelightClient.parsePowerResponse("{\"id\":1,\"result\":[\"ok\"]}");
+    }
+
+    /**
+     * 状态变化时灯会先推一行 props 通知，再回真正的回执（2026-09-25 实测原文）。
+     * 通知行必须被判为"不是回执"，否则 toggle 成功了也会被当成失败。
+     */
+    @Test
+    public void propsNotificationIsNotAReply() {
+        assertFalse(YeelightClient.isReplyTo(
+                "{\"method\":\"props\",\"params\":{\"power\":\"on\"}}", 1));
+        assertTrue(YeelightClient.isReplyTo("{\"id\":1,\"result\":[\"ok\"]}", 1));
+        assertTrue(YeelightClient.isReplyTo(
+                "{\"id\":3, \"error\":{\"code\":-5001,\"message\":\"invalid params\"}}", 3));
+    }
+
+    /** id 要整段匹配：等 1 号回执时，12 号的回执不能冒充。 */
+    @Test
+    public void replyIdMustMatchExactly() {
+        assertFalse(YeelightClient.isReplyTo("{\"id\":12,\"result\":[\"ok\"]}", 1));
+        assertFalse(YeelightClient.isReplyTo("{\"id\":1,\"result\":[\"ok\"]}", 12));
     }
 }

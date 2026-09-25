@@ -16,7 +16,7 @@ import java.util.regex.Pattern;
  * Yeelight 局域网控制协议的同步客户端（只用到查询开关状态和翻转开关两个功能）。
  *
  * <p>协议本身很简单：连到灯的 TCP 端口（默认 55443），发一行 JSON-RPC 请求，
- * 读一行 JSON 响应。请求必须以 \r\n 结尾，灯才认。整个过程走局域网直连，
+ * 读回对应的 JSON 响应。请求必须以 \r\n 结尾，灯才认。整个过程走局域网直连，
  * 不经过小米云，所以断网也能用、延迟也低。前提是灯的"局域网控制"开关要在
  * 米家 App 里手动打开。
  *
@@ -69,7 +69,7 @@ final class YeelightClient {
         return getPower();
     }
 
-    /** 建连、发一行请求、读一行响应，然后关连接。每次调用都是一条新连接。 */
+    /** 建连、发一行请求、读到属于本次请求的那行响应，然后关连接。每次调用都是一条新连接。 */
     private String request(String method, String paramsJson) throws IOException {
         int requestId = nextRequestId.getAndIncrement();
         String payload = buildRequest(requestId, method, paramsJson);
@@ -85,10 +85,17 @@ final class YeelightClient {
 
             BufferedReader reader = new BufferedReader(new InputStreamReader(
                     socket.getInputStream(), StandardCharsets.UTF_8));
-            String response = reader.readLine();
-            if (response == null || response.isEmpty()) {
-                throw new IOException("Yeelight returned no response");
-            }
+            // 灯在状态变化时会先往所有连接广播一行 {"method":"props",...} 通知，
+            // 真正的回执 {"id":N,"result":[...]} 排在它后面（开关实测如此）。
+            // 以前只读第一行，拿到的是通知，于是明明开关成功了界面却显示 OFFLINE。
+            // 这里跳过所有不属于本次请求的行；读超时由上面的 setSoTimeout 兜底。
+            String response;
+            do {
+                response = reader.readLine();
+                if (response == null) {
+                    throw new IOException("Yeelight returned no response");
+                }
+            } while (!isReplyTo(response, requestId));
             // 灯拒绝命令时回的是 {"error":{...}} 而不是 result，要单独识别，
             // 否则下面的正则匹配不到会报一个误导性的"格式非法"。
             if (response.contains("\"error\"")) {
@@ -111,6 +118,17 @@ final class YeelightClient {
                 id,
                 method,
                 paramsJson);
+    }
+
+    /**
+     * 判断这一行是不是对第 requestId 号请求的回执。
+     *
+     * <p>通知行里没有 "id" 字段；回执里 id 紧跟在开头。用正则而不是 contains，
+     * 是为了防止 id 为 1 时误匹配到 "id":12 这种。
+     */
+    static boolean isReplyTo(String line, int requestId) {
+        return Pattern.compile("\"id\"\\s*:\\s*" + requestId + "\\s*[,}]")
+                .matcher(line).find();
     }
 
     /** 从响应里提取开关状态，匹配不到说明返回格式不对，直接当失败处理。 */
