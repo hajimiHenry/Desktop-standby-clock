@@ -82,9 +82,10 @@ public final class MainActivity extends Activity {
     private final Handler autoStyleHandler = new Handler(Looper.getMainLooper());
     private boolean statusReceiverRegistered;
 
-    /** 以下两个是 Service 广播过来的状态副本，用于决定屏幕亮度。 */
+    /** 以下三个是 Service 广播过来的状态副本，用于决定屏幕亮度。 */
     private boolean displayBlackout;
     private boolean bedtimeReminderActive;
+    private boolean sedentaryReminderActive;
 
     /**
      * 轻触点亮：熄屏时碰一下屏幕，临时把显示放出来一小会儿。
@@ -135,6 +136,30 @@ public final class MainActivity extends Activity {
                 // 浮层被提醒挤掉了，要告诉 Service 一声。因为浮层打开期间 Service 会
                 // 暂时压住自动熄屏（用户正在操作，不能黑屏），现在得解除这个压制。
                 if (bedtimeReminderActive && overlayWasVisible) {
+                    sendSettingsOpen(false);
+                }
+                applyDisplayState();
+            } else if (StandbyService.ACTION_SEDENTARY_STATE.equals(intent.getAction())) {
+                sedentaryReminderActive = intent.getBooleanExtra(
+                        StandbyService.EXTRA_SEDENTARY_ACTIVE, false);
+                boolean overlayWasVisible = clockView.isSettingsVisible()
+                        || clockView.isDeviceMenuVisible();
+                clockView.setSedentaryState(
+                        intent.getBooleanExtra(
+                                StandbyService.EXTRA_SEDENTARY_ENABLED, true),
+                        sedentaryReminderActive,
+                        intent.getBooleanExtra(
+                                StandbyService.EXTRA_SEDENTARY_SOUND_ENABLED, true),
+                        intent.getIntExtra(
+                                StandbyService.EXTRA_SEDENTARY_INTERVAL_MINUTES,
+                                SedentaryReminder.DEFAULT_INTERVAL_MINUTES),
+                        intent.getIntExtra(
+                                StandbyService.EXTRA_SEDENTARY_START_HOUR,
+                                SedentaryReminder.DEFAULT_START_HOUR),
+                        intent.getIntExtra(
+                                StandbyService.EXTRA_SEDENTARY_START_MINUTE,
+                                SedentaryReminder.DEFAULT_START_MINUTE));
+                if (sedentaryReminderActive && overlayWasVisible) {
                     sendSettingsOpen(false);
                 }
                 applyDisplayState();
@@ -248,6 +273,7 @@ public final class MainActivity extends Activity {
         super.onStart();
         IntentFilter filter = new IntentFilter(StandbyService.ACTION_DISPLAY_MODE);
         filter.addAction(StandbyService.ACTION_BEDTIME_STATE);
+        filter.addAction(StandbyService.ACTION_SEDENTARY_STATE);
         // RECEIVER_NOT_EXPORTED：只接收本应用发的广播，别的应用发不进来。
         // Android 13 起注册运行时广播必须显式声明导出与否。
         ContextCompat.registerReceiver(
@@ -335,7 +361,8 @@ public final class MainActivity extends Activity {
     private void applyDisplayState() {
         boolean touchAwake = touchWakePolicy.isAwake(SystemClock.elapsedRealtime());
         boolean effectiveBlackout =
-                displayBlackout && !bedtimeReminderActive && !touchAwake;
+                displayBlackout && !bedtimeReminderActive
+                && !sedentaryReminderActive && !touchAwake;
         clockView.setBlackout(effectiveBlackout);
         Window window = getWindow();
         WindowManager.LayoutParams attributes = window.getAttributes();
@@ -397,6 +424,36 @@ public final class MainActivity extends Activity {
                 break;
             case CLOSE_SETTINGS:
                 sendSettingsOpen(false);
+                break;
+            case SEDENTARY_DONE:
+                cancelTouchWake();
+                sendServiceAction(StandbyService.ACTION_SEDENTARY_DONE);
+                break;
+            case TOGGLE_SEDENTARY:
+                sendServiceAction(StandbyService.ACTION_TOGGLE_SEDENTARY);
+                break;
+            case TOGGLE_SEDENTARY_SOUND:
+                sendServiceAction(StandbyService.ACTION_TOGGLE_SEDENTARY_SOUND);
+                break;
+            case SEDENTARY_INTERVAL_MINUS:
+                sendServiceActionWithDelta(
+                        StandbyService.ACTION_ADJUST_SEDENTARY_INTERVAL,
+                        StandbyService.EXTRA_DELTA_MINUTES, -15);
+                break;
+            case SEDENTARY_INTERVAL_PLUS:
+                sendServiceActionWithDelta(
+                        StandbyService.ACTION_ADJUST_SEDENTARY_INTERVAL,
+                        StandbyService.EXTRA_DELTA_MINUTES, 15);
+                break;
+            case SEDENTARY_START_MINUS:
+                sendServiceActionWithDelta(
+                        StandbyService.ACTION_ADJUST_SEDENTARY_START,
+                        StandbyService.EXTRA_DELTA_MINUTES, -30);
+                break;
+            case SEDENTARY_START_PLUS:
+                sendServiceActionWithDelta(
+                        StandbyService.ACTION_ADJUST_SEDENTARY_START,
+                        StandbyService.EXTRA_DELTA_MINUTES, 30);
                 break;
             case TOGGLE_CEILING_LIGHT:
                 toggleCeilingLight();
@@ -722,6 +779,13 @@ public final class MainActivity extends Activity {
         Intent intent = new Intent(this, StandbyService.class)
                 .setAction(action)
                 .putExtra(StandbyService.EXTRA_BEDTIME_DELTA_MINUTES, deltaMinutes);
+        startForegroundService(intent);
+    }
+
+    private void sendServiceActionWithDelta(String action, String extraKey, int deltaMinutes) {
+        Intent intent = new Intent(this, StandbyService.class)
+                .setAction(action)
+                .putExtra(extraKey, deltaMinutes);
         startForegroundService(intent);
     }
 

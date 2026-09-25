@@ -196,6 +196,14 @@ public final class ClockView extends View {
     private boolean bedtimeSoundEnabled = true;
     private boolean bedtimeReminderActive;
     private boolean bedtimeSnoozed;
+    private boolean sedentaryEnabled = true;
+    private boolean sedentarySoundEnabled = true;
+    private boolean sedentaryReminderActive;
+    private int sedentaryIntervalMinutes = SedentaryReminder.DEFAULT_INTERVAL_MINUTES;
+    private int sedentaryStartHour = SedentaryReminder.DEFAULT_START_HOUR;
+    private int sedentaryStartMinute = SedentaryReminder.DEFAULT_START_MINUTE;
+    /** 设置面板当前页签：0 = 时钟，1 = 提醒。 */
+    private int settingsPage;
     /** 设置浮层是否显示（长按打开）。 */
     private boolean settingsVisible;
     /** 侧滑面板是否显示。 */
@@ -281,7 +289,14 @@ public final class ClockView extends View {
         CLOSE_SETTINGS,
         TOGGLE_CEILING_LIGHT,
         WAKE_DESKTOP,
-        CLOSE_DEVICE_MENU
+        CLOSE_DEVICE_MENU,
+        SEDENTARY_DONE,
+        TOGGLE_SEDENTARY,
+        TOGGLE_SEDENTARY_SOUND,
+        SEDENTARY_INTERVAL_MINUS,
+        SEDENTARY_INTERVAL_PLUS,
+        SEDENTARY_START_MINUS,
+        SEDENTARY_START_PLUS
     }
 
     public interface OnStyleSwipeListener {
@@ -465,9 +480,31 @@ public final class ClockView extends View {
         return bedtimeReminderActive;
     }
 
+    /** 接收 Service 广播来的久坐提醒状态。 */
+    public void setSedentaryState(boolean enabled, boolean active, boolean soundEnabled,
+                                  int intervalMinutes, int startHour, int startMinute) {
+        sedentaryEnabled = enabled;
+        sedentaryReminderActive = active;
+        sedentarySoundEnabled = soundEnabled;
+        sedentaryIntervalMinutes = intervalMinutes;
+        sedentaryStartHour = startHour;
+        sedentaryStartMinute = startMinute;
+        // 久坐提醒弹出时也要收掉所有浮层，理由同 setBedtimeState。
+        if (active) {
+            settingsVisible = false;
+            deviceMenuVisible = false;
+            deviceMenuTransitioning = false;
+        }
+        invalidate();
+    }
+
+    public boolean isSedentaryReminderActive() {
+        return sedentaryReminderActive;
+    }
+
     /** 长按切换设置浮层。提醒正在显示、或面板正在做转场动画时忽略请求。 */
     public boolean toggleSettings() {
-        if (!bedtimeReminderActive && !deviceMenuTransitioning) {
+        if (!bedtimeReminderActive && !sedentaryReminderActive && !deviceMenuTransitioning) {
             deviceMenuVisible = false;
             settingsVisible = !settingsVisible;
             invalidate();
@@ -492,7 +529,8 @@ public final class ClockView extends View {
      * 熄屏、提醒中、设置浮层开着这三种情况下不允许打开。
      */
     public boolean setDeviceMenuVisible(boolean visible) {
-        if (visible && (blackout || bedtimeReminderActive || settingsVisible)) {
+        if (visible && (blackout || bedtimeReminderActive || sedentaryReminderActive
+                || settingsVisible)) {
             return false;
         }
         if (deviceMenuVisible == visible && !deviceMenuTransitioning) {
@@ -579,7 +617,8 @@ public final class ClockView extends View {
      * @return false 表示请求被拒（条件不满足或已有动画在播）
      */
     private boolean animateDeviceMenuVisibility(boolean visible, boolean swipeLeft) {
-        if (visible && (blackout || bedtimeReminderActive || settingsVisible)) {
+        if (visible && (blackout || bedtimeReminderActive || sedentaryReminderActive
+                || settingsVisible)) {
             return false;
         }
         if (deviceMenuTransitioning || deviceMenuVisible == visible) {
@@ -622,10 +661,17 @@ public final class ClockView extends View {
         float x = lastTouchX / width;
         float y = lastTouchY / height;
 
-        // 提醒界面：中间那一条区域里，左半边是 DONE，右半边是 +15 分钟。
+        // 就寝提醒界面：中间那一条区域里，左半边是 DONE，右半边是 +15 分钟。
         if (bedtimeReminderActive) {
             if (y >= 0.52f && y <= 0.68f) {
                 return x < 0.5f ? UiAction.BEDTIME_DONE : UiAction.BEDTIME_SNOOZE;
+            }
+            return UiAction.NONE;
+        }
+        // 久坐提醒界面：点面板下半部的任意位置都算按了 OK。
+        if (sedentaryReminderActive) {
+            if (y >= 0.48f && y <= 0.68f) {
+                return UiAction.SEDENTARY_DONE;
             }
             return UiAction.NONE;
         }
@@ -655,38 +701,58 @@ public final class ClockView extends View {
             animateDeviceMenuVisibility(false, !deviceMenuTransitionSwipeLeft);
             return UiAction.CLOSE_DEVICE_MENU;
         }
-        // 设置浮层：从上到下依次是表盘选择、自动切换、就寝时间、开关、声音、关闭。
-        // 每一行占一个 y 区间，左右两半再细分成减 / 加。
+        // 设置浮层（分页）：顶部页签栏切换 CLOCK / REMINDERS 两页。
         if (settingsVisible) {
-            if (y >= 0.300f && y <= 0.395f) {
-                if (x < 0.43f) {
-                    return UiAction.PREVIOUS_STYLE;
+            // 页签栏
+            if (y >= 0.255f && y <= 0.310f) {
+                int newPage = x < 0.5f ? 0 : 1;
+                if (newPage != settingsPage) {
+                    settingsPage = newPage;
+                    invalidate();
                 }
-                if (x > 0.57f) {
-                    return UiAction.NEXT_STYLE;
-                }
+                return UiAction.NONE;
             }
-            if (y > 0.395f && y <= 0.475f) {
-                return UiAction.TOGGLE_AUTO_STYLE_SWITCH;
-            }
-            if (y >= 0.500f && y <= 0.600f) {
-                if (x < 0.43f) {
-                    return UiAction.BEDTIME_MINUS_15;
-                }
-                if (x > 0.57f) {
-                    return UiAction.BEDTIME_PLUS_15;
-                }
-            }
-            if (y > 0.600f && y <= 0.675f) {
-                return UiAction.TOGGLE_BEDTIME;
-            }
-            if (y > 0.675f && y <= 0.750f) {
-                return UiAction.TOGGLE_BEDTIME_SOUND;
-            }
-            if (y >= 0.755f && y <= 0.845f) {
+            // 关闭按钮（两页共享）
+            if (y >= 0.760f && y <= 0.840f) {
                 settingsVisible = false;
                 invalidate();
                 return UiAction.CLOSE_SETTINGS;
+            }
+            if (settingsPage == 0) {
+                // ── CLOCK 页：表盘选择 + 自动轮换 ──
+                if (y >= 0.340f && y <= 0.430f) {
+                    if (x < 0.43f) return UiAction.PREVIOUS_STYLE;
+                    if (x > 0.57f) return UiAction.NEXT_STYLE;
+                }
+                if (y > 0.430f && y <= 0.500f) {
+                    return UiAction.TOGGLE_AUTO_STYLE_SWITCH;
+                }
+            } else {
+                // ── REMINDERS 页 ──
+                // 就寝时间调节
+                if (y >= 0.350f && y <= 0.420f) {
+                    if (x < 0.43f) return UiAction.BEDTIME_MINUS_15;
+                    if (x > 0.57f) return UiAction.BEDTIME_PLUS_15;
+                }
+                // 就寝 ENABLED（左半）/ SOUND（右半）
+                if (y > 0.420f && y <= 0.480f) {
+                    return x < 0.5f ? UiAction.TOGGLE_BEDTIME : UiAction.TOGGLE_BEDTIME_SOUND;
+                }
+                // 久坐间隔调节
+                if (y >= 0.520f && y <= 0.575f) {
+                    if (x < 0.43f) return UiAction.SEDENTARY_INTERVAL_MINUS;
+                    if (x > 0.57f) return UiAction.SEDENTARY_INTERVAL_PLUS;
+                }
+                // 久坐开始时间调节
+                if (y > 0.575f && y <= 0.630f) {
+                    if (x < 0.43f) return UiAction.SEDENTARY_START_MINUS;
+                    if (x > 0.57f) return UiAction.SEDENTARY_START_PLUS;
+                }
+                // 久坐 ENABLED（左半）/ SOUND（右半）
+                if (y > 0.630f && y <= 0.690f) {
+                    return x < 0.5f ? UiAction.TOGGLE_SEDENTARY
+                            : UiAction.TOGGLE_SEDENTARY_SOUND;
+                }
             }
             return UiAction.NONE;
         }
@@ -785,6 +851,7 @@ public final class ClockView extends View {
     private boolean canSwipeClockStyle() {
         return !blackout
                 && !bedtimeReminderActive
+                && !sedentaryReminderActive
                 && !settingsVisible
                 && !deviceMenuVisible
                 && !deviceMenuTransitioning
@@ -795,6 +862,7 @@ public final class ClockView extends View {
     private boolean canSwipeDeviceMenu() {
         return !blackout
                 && !bedtimeReminderActive
+                && !sedentaryReminderActive
                 && !settingsVisible
                 && !deviceMenuTransitioning
                 && outgoingClockStyle == null;
@@ -875,9 +943,9 @@ public final class ClockView extends View {
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
         canvas.drawColor(BACKGROUND);
-        // 熄屏：涂完黑就走，一个像素都不多画。但睡眠提醒可以穿透熄屏
-        // ——提醒本来就是要在暗房里叫醒你的。
-        if (blackout && !bedtimeReminderActive) {
+        // 熄屏：涂完黑就走，一个像素都不多画。但两种提醒可以穿透熄屏——
+        // 它们本来就是要在暗房里引起注意的。
+        if (blackout && !bedtimeReminderActive && !sedentaryReminderActive) {
             return;
         }
 
@@ -893,7 +961,8 @@ public final class ClockView extends View {
         int shiftIndex = (now.getMinute() / 5) % PIXEL_SHIFT.length;
 
         // 面板转场有自己一整套双层绘制逻辑，走单独的分支。
-        if (deviceMenuTransitioning && !bedtimeReminderActive && !settingsVisible) {
+        if (deviceMenuTransitioning && !bedtimeReminderActive
+                && !sedentaryReminderActive && !settingsVisible) {
             drawDeviceMenuTransition(canvas, now, shiftIndex, width, height);
             return;
         }
@@ -905,9 +974,11 @@ public final class ClockView extends View {
         drawClockFaces(canvas, now, width, height);
         canvas.restore();
 
-        // 浮层三选一，if-else 的顺序就是优先级。
+        // 浮层四选一，if-else 的顺序就是优先级。
         if (bedtimeReminderActive) {
             drawBedtimeReminder(canvas, now, width, height);
+        } else if (sedentaryReminderActive) {
+            drawSedentaryReminder(canvas, now, width, height);
         } else if (settingsVisible) {
             drawSettings(canvas, width, height);
         } else if (deviceMenuVisible) {
@@ -916,7 +987,8 @@ public final class ClockView extends View {
 
         // 浮层也要盖一层扫描线才像同一块 CRT 屏幕。单独补是因为书法表盘本身
         // 没有扫描线（那是磷光盘专属的），但它上面的浮层仍然要有。
-        if (bedtimeReminderActive || settingsVisible || deviceMenuVisible) {
+        if (bedtimeReminderActive || sedentaryReminderActive
+                || settingsVisible || deviceMenuVisible) {
             drawScanlines(canvas, width, height);
         }
 
@@ -1133,8 +1205,55 @@ public final class ClockView extends View {
     }
 
     /**
-     * 画设置浮层。所有坐标都是屏幕宽高的比例，必须和 resolveTapAction 里的
+     * 画久坐提醒。和睡眠提醒结构一致，但更简洁：只有一个 OK 按钮。
+     * 标题、正文、按钮的坐标和字号与睡眠提醒相近，保持视觉一致性。
+     */
+    private void drawSedentaryReminder(
+            Canvas canvas, LocalDateTime now, int width, int height) {
+        canvas.drawRect(0f, 0f, width, height, reminderDimPaint);
+
+        // 防烧屏偏移，同就寝提醒：每分钟换一个位置。
+        int shiftIndex = now.getMinute() % PIXEL_SHIFT.length;
+        canvas.save();
+        canvas.translate(PIXEL_SHIFT[shiftIndex][0], PIXEL_SHIFT[shiftIndex][1]);
+
+        float left = width * 0.27f;
+        float right = width * 0.73f;
+        canvas.drawRect(
+                width * 0.245f,
+                height * 0.305f,
+                width * 0.755f,
+                height * 0.705f,
+                reminderPanelPaint);
+        reminderLinePaint.setStrokeWidth(Math.max(2f, height * 0.0022f));
+        reminderLinePaint.setAlpha(225);
+        canvas.drawLine(left, height * 0.335f, right, height * 0.335f, reminderLinePaint);
+        canvas.drawLine(left, height * 0.675f, right, height * 0.675f, reminderLinePaint);
+
+        reminderTitlePaint.setTextSize(height * 0.084f);
+        reminderTitlePaint.setShadowLayer(
+                height * 0.012f, 0f, 0f, Color.argb(125, 255, 110, 0));
+        canvas.drawText("TIME TO MOVE", width * 0.5f, height * 0.445f,
+                reminderTitlePaint);
+        reminderTitlePaint.clearShadowLayer();
+
+        reminderBodyPaint.setTextSize(height * 0.042f);
+        canvas.drawText("STAND UP AND STRETCH",
+                width * 0.5f, height * 0.515f, reminderBodyPaint);
+
+        reminderActionPaint.setTextSize(height * 0.052f);
+        canvas.drawText("OK", width * 0.5f, height * 0.605f, reminderActionPaint);
+
+        drawFocusBrackets(canvas, width * 0.5f, height * 0.588f,
+                width * 0.12f, height * 0.080f, true);
+        canvas.restore();
+    }
+
+    /**
+     * 画设置浮层（分页）。所有坐标都是屏幕宽高的比例，必须和 resolveTapAction 里的
      * 命中区间对得上，否则会出现看得见点不着的按钮。
+     *
+     * <p>两个页签：CLOCK（表盘 + 自动轮换）、REMINDERS（就寝 + 久坐的全部控件）。
      */
     private void drawSettings(Canvas canvas, int width, int height) {
         canvas.drawRect(0f, 0f, width, height, overlayPaint);
@@ -1142,61 +1261,131 @@ public final class ClockView extends View {
         float left = width * 0.25f;
         float right = width * 0.75f;
         reminderLinePaint.setStrokeWidth(Math.max(2f, height * 0.0022f));
-        canvas.drawLine(left, height * 0.175f, right, height * 0.175f, reminderLinePaint);
-        canvas.drawLine(left, height * 0.885f, right, height * 0.885f, reminderLinePaint);
+        canvas.drawLine(left, height * 0.155f, right, height * 0.155f, reminderLinePaint);
+        canvas.drawLine(left, height * 0.875f, right, height * 0.875f, reminderLinePaint);
 
-        reminderTitlePaint.setTextSize(height * 0.058f);
-        canvas.drawText("CLOCK SETTINGS", width * 0.5f, height * 0.245f,
-                reminderTitlePaint);
+        // ── 标题 ──
+        reminderTitlePaint.setTextSize(height * 0.048f);
+        canvas.drawText("SETTINGS", width * 0.5f, height * 0.215f, reminderTitlePaint);
 
-        reminderMutedPaint.setTextSize(height * 0.028f);
-        canvas.drawText("CLOCK STYLE", width * 0.5f, height * 0.295f, reminderMutedPaint);
+        // ── 页签栏 ──
+        float tabY = height * 0.278f;
+        float tabClockX = width * 0.38f;
+        float tabRemindersX = width * 0.62f;
+        reminderActionPaint.setTextSize(height * 0.032f);
+        reminderMutedPaint.setTextSize(height * 0.032f);
+        // 当前页签用 action 色高亮，非当前页签用 muted 色
+        canvas.drawText("CLOCK", tabClockX, tabY,
+                settingsPage == 0 ? reminderActionPaint : reminderMutedPaint);
+        canvas.drawText("REMINDERS", tabRemindersX, tabY,
+                settingsPage == 1 ? reminderActionPaint : reminderMutedPaint);
+        // 活动页签下方的短横线
+        float tabLineY = height * 0.295f;
+        float tabLineHalf = width * 0.06f;
+        float activeTabX = settingsPage == 0 ? tabClockX : tabRemindersX;
+        canvas.drawLine(activeTabX - tabLineHalf, tabLineY,
+                activeTabX + tabLineHalf, tabLineY, reminderLinePaint);
 
-        reminderActionPaint.setTextSize(height * 0.042f);
-        reminderBodyPaint.setTextSize(height * 0.047f);
-        canvas.drawText("[<]", width * 0.365f, height * 0.360f, reminderActionPaint);
-        canvas.drawText(clockStyle.label(), width * 0.5f, height * 0.362f, reminderBodyPaint);
-        canvas.drawText("[>]", width * 0.635f, height * 0.360f, reminderActionPaint);
+        if (settingsPage == 0) {
+            drawSettingsClockPage(canvas, width, height);
+        } else {
+            drawSettingsRemindersPage(canvas, width, height);
+        }
 
-        reminderMutedPaint.setTextSize(height * 0.034f);
-        reminderActionPaint.setTextSize(height * 0.039f);
-        canvas.drawText("AUTO SWITCH", width * 0.455f, height * 0.440f,
-                reminderMutedPaint);
-        canvas.drawText(autoStyleSwitchEnabled ? "ON / 1H" : "OFF", width * 0.570f,
-                height * 0.440f, reminderActionPaint);
-
-        reminderMutedPaint.setTextSize(height * 0.028f);
-        canvas.drawText("BEDTIME", width * 0.5f, height * 0.495f, reminderMutedPaint);
-
-        reminderActionPaint.setTextSize(height * 0.042f);
-        reminderBodyPaint.setTextSize(height * 0.058f);
-        canvas.drawText("[-15]", width * 0.365f, height * 0.562f, reminderActionPaint);
-        canvas.drawText(
-                String.format(Locale.US, "%02d:%02d", bedtimeHour, bedtimeMinute),
-                width * 0.5f,
-                height * 0.567f,
-                reminderBodyPaint);
-        canvas.drawText("[+15]", width * 0.635f, height * 0.562f, reminderActionPaint);
-
-        reminderMutedPaint.setTextSize(height * 0.034f);
-        reminderActionPaint.setTextSize(height * 0.039f);
-        canvas.drawText("ENABLED", width * 0.455f, height * 0.645f, reminderMutedPaint);
-        canvas.drawText(bedtimeEnabled ? "ON" : "OFF", width * 0.555f,
-                height * 0.645f, reminderActionPaint);
-
-        canvas.drawText("SOUND", width * 0.455f, height * 0.715f, reminderMutedPaint);
-        canvas.drawText(bedtimeSoundEnabled ? "ON" : "OFF", width * 0.555f,
-                height * 0.715f, reminderActionPaint);
-
-        reminderActionPaint.setTextSize(height * 0.036f);
-        canvas.drawText("[ CLOSE ]", width * 0.5f, height * 0.805f,
-                reminderActionPaint);
+        // ── 关闭按钮（两页共享）──
+        reminderActionPaint.setTextSize(height * 0.034f);
+        canvas.drawText("[ CLOSE ]", width * 0.5f, height * 0.800f, reminderActionPaint);
 
         if (bedtimeSnoozed) {
-            reminderMutedPaint.setTextSize(height * 0.024f);
+            reminderMutedPaint.setTextSize(height * 0.022f);
             canvas.drawText("SNOOZED FOR THIS SESSION", width * 0.5f,
-                    height * 0.850f, reminderMutedPaint);
+                    height * 0.845f, reminderMutedPaint);
         }
+    }
+
+    /** CLOCK 页签内容：表盘选择 + 自动轮换。 */
+    private void drawSettingsClockPage(Canvas canvas, int width, int height) {
+        // ── 表盘选择 ──
+        reminderMutedPaint.setTextSize(height * 0.026f);
+        canvas.drawText("CLOCK STYLE", width * 0.5f, height * 0.350f, reminderMutedPaint);
+
+        reminderActionPaint.setTextSize(height * 0.039f);
+        reminderBodyPaint.setTextSize(height * 0.044f);
+        canvas.drawText("[<]", width * 0.365f, height * 0.405f, reminderActionPaint);
+        canvas.drawText(clockStyle.label(), width * 0.5f, height * 0.407f,
+                reminderBodyPaint);
+        canvas.drawText("[>]", width * 0.635f, height * 0.405f, reminderActionPaint);
+
+        // ── 自动轮换 ──
+        reminderMutedPaint.setTextSize(height * 0.031f);
+        reminderActionPaint.setTextSize(height * 0.036f);
+        canvas.drawText("AUTO SWITCH", width * 0.455f, height * 0.475f,
+                reminderMutedPaint);
+        canvas.drawText(autoStyleSwitchEnabled ? "ON / 1H" : "OFF", width * 0.570f,
+                height * 0.475f, reminderActionPaint);
+    }
+
+    /** REMINDERS 页签内容：就寝和久坐提醒的全部控件。 */
+    private void drawSettingsRemindersPage(Canvas canvas, int width, int height) {
+        // ── 就寝提醒 ──
+        reminderMutedPaint.setTextSize(height * 0.026f);
+        canvas.drawText("BEDTIME", width * 0.5f, height * 0.340f, reminderMutedPaint);
+
+        // 时间调节
+        reminderActionPaint.setTextSize(height * 0.036f);
+        reminderBodyPaint.setTextSize(height * 0.048f);
+        canvas.drawText("[-15]", width * 0.355f, height * 0.393f, reminderActionPaint);
+        canvas.drawText(
+                String.format(Locale.US, "%02d:%02d", bedtimeHour, bedtimeMinute),
+                width * 0.5f, height * 0.396f, reminderBodyPaint);
+        canvas.drawText("[+15]", width * 0.645f, height * 0.393f, reminderActionPaint);
+
+        // ENABLED + SOUND 合一行
+        reminderMutedPaint.setTextSize(height * 0.028f);
+        reminderActionPaint.setTextSize(height * 0.032f);
+        float toggleY = height * 0.453f;
+        canvas.drawText("ENABLED", width * 0.365f, toggleY, reminderMutedPaint);
+        canvas.drawText(bedtimeEnabled ? "ON" : "OFF", width * 0.455f, toggleY,
+                reminderActionPaint);
+        canvas.drawText("SOUND", width * 0.565f, toggleY, reminderMutedPaint);
+        canvas.drawText(bedtimeSoundEnabled ? "ON" : "OFF", width * 0.640f, toggleY,
+                reminderActionPaint);
+
+        // ── 久坐提醒 ──
+        reminderMutedPaint.setTextSize(height * 0.026f);
+        canvas.drawText("SEDENTARY", width * 0.5f, height * 0.510f, reminderMutedPaint);
+
+        // 间隔调节
+        reminderActionPaint.setTextSize(height * 0.036f);
+        reminderBodyPaint.setTextSize(height * 0.042f);
+        reminderMutedPaint.setTextSize(height * 0.024f);
+        float intervalY = height * 0.555f;
+        canvas.drawText("EVERY", width * 0.315f, intervalY, reminderMutedPaint);
+        canvas.drawText("[-]", width * 0.380f, intervalY, reminderActionPaint);
+        canvas.drawText(sedentaryIntervalMinutes + " MIN", width * 0.5f, intervalY,
+                reminderBodyPaint);
+        canvas.drawText("[+]", width * 0.620f, intervalY, reminderActionPaint);
+
+        // 开始时间调节
+        float startY = height * 0.610f;
+        canvas.drawText("FROM", width * 0.320f, startY, reminderMutedPaint);
+        canvas.drawText("[-]", width * 0.380f, startY, reminderActionPaint);
+        canvas.drawText(
+                String.format(Locale.US, "%02d:%02d",
+                        sedentaryStartHour, sedentaryStartMinute),
+                width * 0.5f, startY, reminderBodyPaint);
+        canvas.drawText("[+]", width * 0.620f, startY, reminderActionPaint);
+
+        // ENABLED + SOUND 合一行
+        reminderMutedPaint.setTextSize(height * 0.028f);
+        reminderActionPaint.setTextSize(height * 0.032f);
+        float sedToggleY = height * 0.665f;
+        canvas.drawText("ENABLED", width * 0.365f, sedToggleY, reminderMutedPaint);
+        canvas.drawText(sedentaryEnabled ? "ON" : "OFF", width * 0.455f, sedToggleY,
+                reminderActionPaint);
+        canvas.drawText("SOUND", width * 0.565f, sedToggleY, reminderMutedPaint);
+        canvas.drawText(sedentarySoundEnabled ? "ON" : "OFF", width * 0.640f, sedToggleY,
+                reminderActionPaint);
     }
 
     /** 画设备控制面板：左右两个大按钮，分别控灯和唤醒电脑，下面各带一行状态文字。 */

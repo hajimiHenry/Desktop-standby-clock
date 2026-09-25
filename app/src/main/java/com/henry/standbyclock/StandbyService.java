@@ -59,6 +59,16 @@ public final class StandbyService extends Service implements SensorEventListener
             "com.henry.standbyclock.action.TOGGLE_BEDTIME";
     static final String ACTION_TOGGLE_BEDTIME_SOUND =
             "com.henry.standbyclock.action.TOGGLE_BEDTIME_SOUND";
+    static final String ACTION_SEDENTARY_DONE =
+            "com.henry.standbyclock.action.SEDENTARY_DONE";
+    static final String ACTION_TOGGLE_SEDENTARY =
+            "com.henry.standbyclock.action.TOGGLE_SEDENTARY";
+    static final String ACTION_TOGGLE_SEDENTARY_SOUND =
+            "com.henry.standbyclock.action.TOGGLE_SEDENTARY_SOUND";
+    static final String ACTION_ADJUST_SEDENTARY_INTERVAL =
+            "com.henry.standbyclock.action.ADJUST_SEDENTARY_INTERVAL";
+    static final String ACTION_ADJUST_SEDENTARY_START =
+            "com.henry.standbyclock.action.ADJUST_SEDENTARY_START";
     /** 浮层开 / 关，服务据此临时压住自动熄屏。 */
     static final String ACTION_SET_SETTINGS_OPEN =
             "com.henry.standbyclock.action.SET_SETTINGS_OPEN";
@@ -68,6 +78,8 @@ public final class StandbyService extends Service implements SensorEventListener
             "com.henry.standbyclock.action.DISPLAY_MODE";
     static final String ACTION_BEDTIME_STATE =
             "com.henry.standbyclock.action.BEDTIME_STATE";
+    static final String ACTION_SEDENTARY_STATE =
+            "com.henry.standbyclock.action.SEDENTARY_STATE";
     static final String EXTRA_BLACKOUT = "blackout";
     static final String EXTRA_BEDTIME_ACTIVE = "bedtime_active";
     static final String EXTRA_BEDTIME_ENABLED = "bedtime_enabled";
@@ -76,6 +88,13 @@ public final class StandbyService extends Service implements SensorEventListener
     static final String EXTRA_BEDTIME_SNOOZED = "bedtime_snoozed";
     static final String EXTRA_BEDTIME_SOUND_ENABLED = "bedtime_sound_enabled";
     static final String EXTRA_BEDTIME_DELTA_MINUTES = "bedtime_delta_minutes";
+    static final String EXTRA_SEDENTARY_ACTIVE = "sedentary_active";
+    static final String EXTRA_SEDENTARY_ENABLED = "sedentary_enabled";
+    static final String EXTRA_SEDENTARY_SOUND_ENABLED = "sedentary_sound_enabled";
+    static final String EXTRA_SEDENTARY_INTERVAL_MINUTES = "sedentary_interval_minutes";
+    static final String EXTRA_SEDENTARY_START_HOUR = "sedentary_start_hour";
+    static final String EXTRA_SEDENTARY_START_MINUTE = "sedentary_start_minute";
+    static final String EXTRA_DELTA_MINUTES = "delta_minutes";
     static final String EXTRA_SETTINGS_OPEN = "settings_open";
 
     private static final String TAG = "StandbyService";
@@ -105,6 +124,15 @@ public final class StandbyService extends Service implements SensorEventListener
     private static final String KEY_BEDTIME_SOUND_ENABLED = "bedtime_sound_enabled";
     private static final String KEY_BEDTIME_SOUND_PLAY_COUNT = "bedtime_sound_play_count";
     private static final String KEY_BEDTIME_NEXT_SOUND_AT = "bedtime_next_sound_at";
+    private static final String KEY_SEDENTARY_ENABLED = "sedentary_enabled";
+    private static final String KEY_SEDENTARY_ACTIVE = "sedentary_active";
+    private static final String KEY_SEDENTARY_LAST_DISMISSED = "sedentary_last_dismissed";
+    private static final String KEY_SEDENTARY_SOUND_ENABLED = "sedentary_sound_enabled";
+    private static final String KEY_SEDENTARY_SOUND_PLAY_COUNT = "sedentary_sound_play_count";
+    private static final String KEY_SEDENTARY_NEXT_SOUND_AT = "sedentary_next_sound_at";
+    private static final String KEY_SEDENTARY_INTERVAL_MINUTES = "sedentary_interval_minutes";
+    private static final String KEY_SEDENTARY_START_HOUR = "sedentary_start_hour";
+    private static final String KEY_SEDENTARY_START_MINUTE = "sedentary_start_minute";
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     /** 环境光的决策状态机，纯逻辑部分都在那个类里。 */
@@ -116,6 +144,7 @@ public final class StandbyService extends Service implements SensorEventListener
         @Override
         public void run() {
             evaluateBedtimeSchedule();
+            evaluateSedentarySchedule();
             mainHandler.postDelayed(this, BEDTIME_CHECK_INTERVAL_MS);
         }
     };
@@ -148,6 +177,20 @@ public final class StandbyService extends Service implements SensorEventListener
     /** 用户点过"DONE"的日期，用来保证同一天不再重复提醒。 */
     private String bedtimeAcknowledgedDate = "";
 
+    // --- 久坐提醒的状态 ---
+    private boolean sedentaryEnabled;
+    private boolean sedentaryReminderActive;
+    /** 上次按掉久坐提醒的时间戳。首次启动时初始化为当前时刻，让第一次提醒在间隔时长之后。 */
+    private long sedentaryLastDismissedMs;
+    private boolean sedentarySoundEnabled;
+    private int sedentarySoundPlayCount;
+    private long sedentaryNextSoundAt;
+    /** 可调的提醒间隔（分钟），默认 45，范围 15-120。 */
+    private int sedentaryIntervalMinutes;
+    /** 工作时段起始时间，默认 09:00。结束时间跟随就寝设置。 */
+    private int sedentaryStartHour;
+    private int sedentaryStartMinute;
+
     /** 界面上有浮层开着，此时暂不熄屏。 */
     private boolean settingsDisplayHeld;
     private long lastLightLogMs;
@@ -170,6 +213,7 @@ public final class StandbyService extends Service implements SensorEventListener
         preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE);
         migrateLegacyStateAndRemoveCalibration();
         loadBedtimeState();
+        loadSedentaryState();
 
         screenExecutor = Executors.newSingleThreadExecutor();
         PowerManager powerManager = getSystemService(PowerManager.class);
@@ -199,6 +243,7 @@ public final class StandbyService extends Service implements SensorEventListener
                 case ACTION_REQUEST_STATUS:
                     broadcastDisplayMode();
                     broadcastBedtimeState();
+                    broadcastSedentaryState();
                     break;
                 case ACTION_BEDTIME_DONE:
                     acknowledgeBedtime();
@@ -214,6 +259,23 @@ public final class StandbyService extends Service implements SensorEventListener
                     break;
                 case ACTION_TOGGLE_BEDTIME_SOUND:
                     toggleBedtimeSound();
+                    break;
+                case ACTION_SEDENTARY_DONE:
+                    acknowledgeSedentary();
+                    break;
+                case ACTION_TOGGLE_SEDENTARY:
+                    toggleSedentaryEnabled();
+                    break;
+                case ACTION_TOGGLE_SEDENTARY_SOUND:
+                    toggleSedentarySound();
+                    break;
+                case ACTION_ADJUST_SEDENTARY_INTERVAL:
+                    adjustSedentaryInterval(
+                            intent.getIntExtra(EXTRA_DELTA_MINUTES, 0));
+                    break;
+                case ACTION_ADJUST_SEDENTARY_START:
+                    adjustSedentaryStart(
+                            intent.getIntExtra(EXTRA_DELTA_MINUTES, 0));
                     break;
                 case ACTION_SET_SETTINGS_OPEN:
                     settingsDisplayHeld = intent.getBooleanExtra(EXTRA_SETTINGS_OPEN, false);
@@ -396,6 +458,13 @@ public final class StandbyService extends Service implements SensorEventListener
 
     /** 激活提醒：重置响铃计数、存盘、通知界面，并立刻响第一声。 */
     private synchronized void activateBedtimeReminder(String reminderDate) {
+        // 就寝提醒优先级更高，久坐提醒正在显示的话先收掉。
+        if (sedentaryReminderActive) {
+            sedentaryReminderActive = false;
+            sedentaryLastDismissedMs = System.currentTimeMillis();
+            persistSedentaryState();
+            broadcastSedentaryState();
+        }
         bedtimeReminderActive = true;
         bedtimeReminderDate = reminderDate;
         bedtimeSnoozeUntil = 0L;
@@ -561,6 +630,178 @@ public final class StandbyService extends Service implements SensorEventListener
                 .putExtra(EXTRA_BEDTIME_SOUND_ENABLED, bedtimeSoundEnabled)
                 .putExtra(EXTRA_BEDTIME_SNOOZED,
                         bedtimeSnoozeUntil > System.currentTimeMillis());
+        sendBroadcast(intent);
+    }
+
+    // ── 久坐提醒 ──────────────────────────────────────────────────────
+
+    /** 从磁盘恢复久坐提醒状态。首次运行时 lastDismissed 取当前时刻，让第一次提醒 45 分钟后才来。 */
+    private void loadSedentaryState() {
+        sedentaryEnabled = preferences.getBoolean(KEY_SEDENTARY_ENABLED, true);
+        sedentarySoundEnabled = preferences.getBoolean(KEY_SEDENTARY_SOUND_ENABLED, true);
+        sedentaryReminderActive = preferences.getBoolean(KEY_SEDENTARY_ACTIVE, false);
+        sedentaryLastDismissedMs = preferences.getLong(
+                KEY_SEDENTARY_LAST_DISMISSED, System.currentTimeMillis());
+        sedentarySoundPlayCount = preferences.getInt(KEY_SEDENTARY_SOUND_PLAY_COUNT, 0);
+        sedentaryNextSoundAt = preferences.getLong(KEY_SEDENTARY_NEXT_SOUND_AT, 0L);
+        sedentaryIntervalMinutes = preferences.getInt(
+                KEY_SEDENTARY_INTERVAL_MINUTES,
+                SedentaryReminder.DEFAULT_INTERVAL_MINUTES);
+        sedentaryStartHour = preferences.getInt(
+                KEY_SEDENTARY_START_HOUR, SedentaryReminder.DEFAULT_START_HOUR);
+        sedentaryStartMinute = preferences.getInt(
+                KEY_SEDENTARY_START_MINUTE, SedentaryReminder.DEFAULT_START_MINUTE);
+    }
+
+    /**
+     * 久坐提醒的主判断，搭在就寝提醒同一个 15 秒轮询里。
+     * 就寝提醒正在显示时不激活——就寝更重要，而且两个提醒叠在一起也看不了。
+     */
+    private synchronized void evaluateSedentarySchedule() {
+        if (!sedentaryEnabled || bedtimeReminderActive) {
+            return;
+        }
+        // 已经在显示了，只需看看该不该再响一声。
+        if (sedentaryReminderActive) {
+            playSedentarySoundIfDue(System.currentTimeMillis());
+            return;
+        }
+        long nowMs = System.currentTimeMillis();
+        long intervalMs = sedentaryIntervalMinutes * 60L * 1_000L;
+        if (SedentaryReminder.shouldActivate(
+                java.time.LocalTime.now(),
+                sedentaryEnabled, sedentaryReminderActive,
+                sedentaryLastDismissedMs, nowMs, intervalMs,
+                sedentaryStartHour, sedentaryStartMinute,
+                bedtimeHour, bedtimeMinute)) {
+            activateSedentaryReminder();
+        }
+    }
+
+    /** 激活久坐提醒：重置响铃计数、存盘、通知界面，立刻响第一声。 */
+    private synchronized void activateSedentaryReminder() {
+        sedentaryReminderActive = true;
+        sedentarySoundPlayCount = 0;
+        sedentaryNextSoundAt = System.currentTimeMillis();
+        persistSedentaryState();
+        broadcastSedentaryState();
+        playSedentarySoundIfDue(System.currentTimeMillis());
+        Log.i(TAG, "sedentary_reminder=ACTIVE");
+    }
+
+    /** 用户按了 OK，收起提醒并重置计时器。 */
+    private synchronized void acknowledgeSedentary() {
+        if (!sedentaryReminderActive) {
+            return;
+        }
+        sedentaryReminderActive = false;
+        sedentaryLastDismissedMs = System.currentTimeMillis();
+        sedentarySoundPlayCount = 0;
+        sedentaryNextSoundAt = 0L;
+        persistSedentaryState();
+        broadcastSedentaryState();
+        Log.i(TAG, "sedentary_reminder=DONE");
+    }
+
+    /** 总开关。关掉时清除正在显示的提醒。 */
+    private synchronized void toggleSedentaryEnabled() {
+        sedentaryEnabled = !sedentaryEnabled;
+        if (sedentaryEnabled) {
+            // 刚打开时从现在开始计时，不立刻弹
+            sedentaryLastDismissedMs = System.currentTimeMillis();
+        } else {
+            sedentaryReminderActive = false;
+            sedentarySoundPlayCount = 0;
+            sedentaryNextSoundAt = 0L;
+        }
+        persistSedentaryState();
+        broadcastSedentaryState();
+    }
+
+    private synchronized void toggleSedentarySound() {
+        sedentarySoundEnabled = !sedentarySoundEnabled;
+        persistSedentaryState();
+        broadcastSedentaryState();
+    }
+
+    /** 调整久坐提醒间隔，±15 分钟为一步，钳位到 15-120 分钟。 */
+    private synchronized void adjustSedentaryInterval(int deltaMinutes) {
+        sedentaryIntervalMinutes = SedentaryReminder.clampInterval(
+                sedentaryIntervalMinutes + deltaMinutes);
+        persistSedentaryState();
+        broadcastSedentaryState();
+    }
+
+    /** 调整久坐提醒开始时间，复用 BedtimeSchedule 的循环取模逻辑。 */
+    private synchronized void adjustSedentaryStart(int deltaMinutes) {
+        int adjusted = BedtimeSchedule.adjustMinutes(
+                sedentaryStartHour, sedentaryStartMinute, deltaMinutes);
+        sedentaryStartHour = adjusted / 60;
+        sedentaryStartMinute = adjusted % 60;
+        persistSedentaryState();
+        broadcastSedentaryState();
+    }
+
+    /** 复用就寝提醒同一段提示音。播放逻辑也完全一致：最多两次，间隔 5 分钟。 */
+    private synchronized void playSedentarySoundIfDue(long nowMs) {
+        if (!SedentaryReminder.shouldPlaySound(
+                sedentarySoundEnabled,
+                sedentaryReminderActive,
+                sedentarySoundPlayCount,
+                sedentaryNextSoundAt,
+                nowMs)) {
+            return;
+        }
+
+        AudioAttributes attributes = new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build();
+        MediaPlayer player = MediaPlayer.create(
+                this, R.raw.bedtime_crt_chime, attributes, 0);
+        if (player == null) {
+            Log.e(TAG, "Unable to create sedentary sound player");
+            return;
+        }
+        player.setOnCompletionListener(MediaPlayer::release);
+        player.setOnErrorListener((failedPlayer, what, extra) -> {
+            failedPlayer.release();
+            Log.e(TAG, "Sedentary sound playback failed: what=" + what + " extra=" + extra);
+            return true;
+        });
+        player.start();
+
+        sedentarySoundPlayCount++;
+        sedentaryNextSoundAt = sedentarySoundPlayCount < SedentaryReminder.MAX_SOUND_PLAYS
+                ? nowMs + SedentaryReminder.SOUND_REPEAT_MS
+                : 0L;
+        persistSedentaryState();
+        Log.i(TAG, "sedentary_sound=PLAY count=" + sedentarySoundPlayCount);
+    }
+
+    private void persistSedentaryState() {
+        preferences.edit()
+                .putBoolean(KEY_SEDENTARY_ENABLED, sedentaryEnabled)
+                .putBoolean(KEY_SEDENTARY_ACTIVE, sedentaryReminderActive)
+                .putLong(KEY_SEDENTARY_LAST_DISMISSED, sedentaryLastDismissedMs)
+                .putBoolean(KEY_SEDENTARY_SOUND_ENABLED, sedentarySoundEnabled)
+                .putInt(KEY_SEDENTARY_SOUND_PLAY_COUNT, sedentarySoundPlayCount)
+                .putLong(KEY_SEDENTARY_NEXT_SOUND_AT, sedentaryNextSoundAt)
+                .putInt(KEY_SEDENTARY_INTERVAL_MINUTES, sedentaryIntervalMinutes)
+                .putInt(KEY_SEDENTARY_START_HOUR, sedentaryStartHour)
+                .putInt(KEY_SEDENTARY_START_MINUTE, sedentaryStartMinute)
+                .apply();
+    }
+
+    private void broadcastSedentaryState() {
+        Intent intent = new Intent(ACTION_SEDENTARY_STATE)
+                .setPackage(getPackageName())
+                .putExtra(EXTRA_SEDENTARY_ACTIVE, sedentaryReminderActive)
+                .putExtra(EXTRA_SEDENTARY_ENABLED, sedentaryEnabled)
+                .putExtra(EXTRA_SEDENTARY_SOUND_ENABLED, sedentarySoundEnabled)
+                .putExtra(EXTRA_SEDENTARY_INTERVAL_MINUTES, sedentaryIntervalMinutes)
+                .putExtra(EXTRA_SEDENTARY_START_HOUR, sedentaryStartHour)
+                .putExtra(EXTRA_SEDENTARY_START_MINUTE, sedentaryStartMinute);
         sendBroadcast(intent);
     }
 
