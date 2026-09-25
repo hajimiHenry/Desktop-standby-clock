@@ -458,6 +458,12 @@ public final class MainActivity extends Activity {
             case TOGGLE_CEILING_LIGHT:
                 toggleCeilingLight();
                 break;
+            case LIGHT_PRESET_STUDY:
+                applyCeilingLightPreset(LightPreset.STUDY);
+                break;
+            case LIGHT_PRESET_REST:
+                applyCeilingLightPreset(LightPreset.REST);
+                break;
             case WAKE_DESKTOP:
                 wakeDesktop();
                 break;
@@ -516,6 +522,52 @@ public final class MainActivity extends Activity {
                 clockView.setCeilingLightStatus(completedStatus);
             });
         });
+    }
+
+    /**
+     * 套用场景预设。流程和 runCeilingLightRequest 一样，并且共用同一个进行中标记——
+     * 开关和预设打的是同一盏灯，不能两条命令同时在路上。
+     * 成功后状态栏显示预设名（STUDY / REST），比笼统的 ON 更能说明灯现在处于哪一档。
+     */
+    private void applyCeilingLightPreset(LightPreset preset) {
+        if (!DeviceControlConfig.isYeelightConfigured()) {
+            clockView.setCeilingLightStatus("NOT CONFIGURED");
+            return;
+        }
+        if (lightRequestInFlight) {
+            return;
+        }
+        lightRequestInFlight = true;
+        clockView.setCeilingLightStatus("SETTING...");
+        deviceControlExecutor.execute(() -> {
+            String status;
+            try {
+                applyPresetWithRecovery(preset);
+                status = preset.label;
+            } catch (Exception exception) {
+                Log.w(TAG, "Unable to apply Yeelight preset " + preset, exception);
+                status = "OFFLINE";
+            }
+            String completedStatus = status;
+            runOnUiThread(() -> {
+                lightRequestInFlight = false;
+                clockView.setCeilingLightStatus(completedStatus);
+            });
+        });
+    }
+
+    /**
+     * set_scene 是幂等的（同参数发几次结果都一样），所以和查询一样，
+     * 失败时可以直接按 MAC 刷新地址后整条重发一次，不需要 toggle 那套"先验证再只发一次"。
+     */
+    private void applyPresetWithRecovery(LightPreset preset) throws IOException {
+        YeelightClient client = clientForResolvedAddress(false);
+        try {
+            client.applyPreset(preset);
+        } catch (IOException firstFailure) {
+            yeelightAddressResolver.invalidate();
+            clientForResolvedAddress(true).applyPreset(preset);
+        }
     }
 
     /** 状态查询没有副作用，地址失效时可以安全地按 MAC 刷新地址并重试一次。 */

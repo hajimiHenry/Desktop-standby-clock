@@ -288,6 +288,8 @@ public final class ClockView extends View {
         NEXT_STYLE,
         CLOSE_SETTINGS,
         TOGGLE_CEILING_LIGHT,
+        LIGHT_PRESET_STUDY,
+        LIGHT_PRESET_REST,
         WAKE_DESKTOP,
         CLOSE_DEVICE_MENU,
         SEDENTARY_DONE,
@@ -689,6 +691,13 @@ public final class ClockView extends View {
             if (y >= 0.31f && y <= 0.72f) {
                 if (x >= 0.14f && x <= 0.47f) {
                     startDeviceButtonPulse(DEVICE_BUTTON_LIGHT);
+                    // 灯按钮框内的底部一行是两个预设（和 drawDeviceMenu 里 presetY 对应），
+                    // 以灯按钮中线 0.305 为界左 STUDY 右 REST；框内其余部分仍是开关。
+                    if (y >= 0.61f) {
+                        return x < 0.305f
+                                ? UiAction.LIGHT_PRESET_STUDY
+                                : UiAction.LIGHT_PRESET_REST;
+                    }
                     return UiAction.TOGGLE_CEILING_LIGHT;
                 }
                 if (x >= 0.53f && x <= 0.86f) {
@@ -1430,6 +1439,15 @@ public final class ClockView extends View {
                 reminderActionPaint);
         canvas.drawText("WAKE DESKTOP", desktopCenterX, height * 0.475f,
                 reminderActionPaint);
+
+        // 灯按钮框内底部的两个预设，用和设置页 [-] [+] 一样的方括号写法表示"可点"。
+        // 左右各偏离中线 0.075 宽，正好落在 resolveTapAction 里按中线切开的两半。
+        reminderActionPaint.setTextSize(height * 0.036f);
+        float presetY = height * 0.650f;
+        canvas.drawText("[" + LightPreset.STUDY.label + "]",
+                lightCenterX - width * 0.075f, presetY, reminderActionPaint);
+        canvas.drawText("[" + LightPreset.REST.label + "]",
+                lightCenterX + width * 0.075f, presetY, reminderActionPaint);
 
         reminderBodyPaint.setTextSize(height * 0.047f);
         boolean lightStatusAnimating = drawDeviceStatusTransition(

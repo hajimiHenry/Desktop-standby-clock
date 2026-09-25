@@ -63,4 +63,11 @@ public final class YeelightClientTest {
         assertFalse(YeelightClient.isReplyTo("{\"id\":12,\"result\":[\"ok\"]}", 1));
         assertFalse(YeelightClient.isReplyTo("{\"id\":1,\"result\":[\"ok\"]}", 12));
     }
+
+    /** 预设落到报文上就是 set_scene 的 ["ct",色温,亮度]，和实测能用的写法一致。 */
+    @Test
+    public void presetsBuildCtSceneParams() {
+        assertEquals("[\"ct\",4000,100]", YeelightClient.buildSceneParams(LightPreset.STUDY));
+        assertEquals("[\"ct\",2700,25]", YeelightClient.buildSceneParams(LightPreset.REST));
+    }
 }

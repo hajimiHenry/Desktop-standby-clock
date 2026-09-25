@@ -13,7 +13,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Yeelight 局域网控制协议的同步客户端（只用到查询开关状态和翻转开关两个功能）。
+ * Yeelight 局域网控制协议的同步客户端（查询开关、翻转开关、一次性套用场景预设）。
  *
  * <p>协议本身很简单：连到灯的 TCP 端口（默认 55443），发一行 JSON-RPC 请求，
  * 读回对应的 JSON 响应。请求必须以 \r\n 结尾，灯才认。整个过程走局域网直连，
@@ -69,6 +69,27 @@ final class YeelightClient {
         return getPower();
     }
 
+    /**
+     * 一条命令同时设好色温和亮度；灯是关着的会顺带打开（实测确认）。
+     *
+     * <p>用 set_scene 而不是 set_ct_abx + set_bright 两条：两条命令中间如果掉线，
+     * 灯会停在"色温改了亮度没改"的半截状态。而且 set_scene 是幂等的——
+     * 同样的参数发几次结果都一样，所以调用方在地址失效时可以放心重试，
+     * 不像 toggle 那样重发会开了又关。
+     */
+    void applyPreset(LightPreset preset) throws IOException {
+        String response = request("set_scene", buildSceneParams(preset));
+        if (!OK_RESULT.matcher(response).find()) {
+            throw new IOException("Yeelight rejected preset " + preset + ": " + response);
+        }
+    }
+
+    /** 拼 set_scene 的参数，形如 ["ct",4000,100]。 */
+    static String buildSceneParams(LightPreset preset) {
+        return String.format(
+                Locale.US, "[\"ct\",%d,%d]", preset.colorTemperature, preset.brightness);
+    }
+
     /** 建连、发一行请求、读到属于本次请求的那行响应，然后关连接。每次调用都是一条新连接。 */
     private String request(String method, String paramsJson) throws IOException {
         int requestId = nextRequestId.getAndIncrement();
@@ -86,7 +107,7 @@ final class YeelightClient {
             BufferedReader reader = new BufferedReader(new InputStreamReader(
                     socket.getInputStream(), StandardCharsets.UTF_8));
             // 灯在状态变化时会先往所有连接广播一行 {"method":"props",...} 通知，
-            // 真正的回执 {"id":N,"result":[...]} 排在它后面（开关实测如此）。
+            // 真正的回执 {"id":N,"result":[...]} 排在它后面（开关、set_scene 实测都是这样）。
             // 以前只读第一行，拿到的是通知，于是明明开关成功了界面却显示 OFFLINE。
             // 这里跳过所有不属于本次请求的行；读超时由上面的 setSoTimeout 兜底。
             String response;
